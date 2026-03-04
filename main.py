@@ -1,3 +1,4 @@
+from google.colab import drive
 
 import os
 import gc
@@ -22,7 +23,7 @@ from scipy.signal import butter, filtfilt
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-
+drive.mount('/content/drive')
 
 print(f"Torch Version: {torch.__version__}")
 print(f"CUDA Available: {torch.cuda.is_available()}")
@@ -32,7 +33,7 @@ if torch.cuda.is_available():
 else:
     print("Still not seeing GPU.")
 
-BASE_DIR = Path.cwd()
+BASE_DIR = Path("/content/drive/MyDrive/sleep_model")
 # UPDATED FOR YOUR FOLDER NAMES (Data/edf)
 EDF_DIR    = BASE_DIR / "Data" / "edf"
 XML_DIR    = BASE_DIR /  "Data" / "annot"
