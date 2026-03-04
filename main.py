@@ -455,9 +455,7 @@ def train_pipeline():
 # =========================================================
 if __name__ == "__main__":
     print("🚀 Script Initialized...")
-
-    if not os.path.exists(META_FILE):
-        preprocess()
+    preprocess()
 
     # 2. RUN TRAINING IMMEDIATELY AFTER
     print("\n✅ Preprocessing complete. Now starting TRAINING...")
