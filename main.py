@@ -324,154 +324,350 @@ class EnhancedViT(nn.Module):
         return self.head(x)
 
 # =========================================================
-# TRAIN / EVALUATE
+# MULTITHREAD SETTINGS (COLAB OPTIMIZED)
 # =========================================================
-def train_model(model, train_loader, val_loader, class_weights, epochs=30, patience=12):
-    model.to(DEVICE)
-    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs//2)
-    criterion = nn.CrossEntropyLoss(weight=class_weights.to(DEVICE))
+import multiprocessing
+torch.set_num_threads(multiprocessing.cpu_count())
 
-    best_f1 = -1.0
+NUM_WORKERS = 4
+
+# =========================================================
+# TRAIN FUNCTION
+# =========================================================
+def train_model(model, train_loader, val_loader, class_weights, epochs=30, patience=10):
+
+    model.to(DEVICE)
+
+    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=epochs//2
+    )
+
+    criterion = nn.CrossEntropyLoss(
+        weight=class_weights.to(DEVICE)
+    )
+
+    best_f1 = -1
     best_state = None
     patience_counter = 0
 
-    print(f"Starting training on {DEVICE} for {epochs} epochs...")
-
     for epoch in range(epochs):
-        model.train()
-        train_loss = 0.0
-        for x, y in train_loader:
-            x, y = x.to(DEVICE), y.to(DEVICE)
-            optimizer.zero_grad()
-            out = model(x)
-            loss = criterion(out, y)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            train_loss += loss.item() * x.size(0)
 
-        train_loss /= len(train_loader.dataset)
+        model.train()
+        total_loss = 0
+
+        for x,y in train_loader:
+
+            x = x.to(DEVICE, non_blocking=True)
+            y = y.to(DEVICE, non_blocking=True)
+
+            optimizer.zero_grad()
+
+            out = model(x)
+
+            loss = criterion(out,y)
+
+            loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(),1)
+
+            optimizer.step()
+
+            total_loss += loss.item()*x.size(0)
+
+        train_loss = total_loss/len(train_loader.dataset)
 
         model.eval()
-        preds, trues = [], []
-        val_loss = 0.0
+
+        preds=[]
+        trues=[]
+        val_loss=0
+
         with torch.no_grad():
-            for x, y in val_loader:
-                x, y = x.to(DEVICE), y.to(DEVICE)
+
+            for x,y in val_loader:
+
+                x = x.to(DEVICE, non_blocking=True)
+                y = y.to(DEVICE, non_blocking=True)
+
                 out = model(x)
-                loss = criterion(out, y)
-                val_loss += loss.item() * x.size(0)
-                p = out.argmax(dim=1).cpu().numpy()
+
+                loss = criterion(out,y)
+
+                val_loss += loss.item()*x.size(0)
+
+                p = out.argmax(1).cpu().numpy()
+
                 preds.extend(p)
                 trues.extend(y.cpu().numpy())
 
-        val_loss /= len(val_loader.dataset)
-        macro_f1 = f1_score(trues, preds, average="macro")
+        val_loss = val_loss/len(val_loader.dataset)
 
-        print(f"Epoch {epoch+1:2d} | Train Loss: {train_loss:.4f} | "
-              f"Val Loss: {val_loss:.4f} | Val Macro F1: {macro_f1:.4f}")
+        macro_f1 = f1_score(trues,preds,average="macro")
+
+        print(
+            f"Epoch {epoch+1} | Train Loss {train_loss:.4f} | Val Loss {val_loss:.4f} | Val F1 {macro_f1:.4f}"
+        )
 
         scheduler.step()
 
-        if macro_f1 > best_f1:
+        if macro_f1>best_f1:
+
             best_f1 = macro_f1
             best_state = model.state_dict()
-            patience_counter = 0
-        else:
-            patience_counter += 1
 
-        if patience_counter >= patience:
+            patience_counter = 0
+
+        else:
+
+            patience_counter+=1
+
+        if patience_counter>=patience:
+
             print("Early stopping triggered")
             break
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
+    model.load_state_dict(best_state)
+
     return model
 
+
+# =========================================================
+# EVALUATION FUNCTION
+# =========================================================
 def evaluate(model, loader, name):
+
     model.eval()
-    preds, trues = [], []
+
+    preds=[]
+    trues=[]
+
     with torch.no_grad():
-        for x, y in loader:
+
+        for x,y in loader:
+
             x = x.to(DEVICE)
+
             out = model(x)
-            p = out.argmax(dim=1).cpu().numpy()
+
+            p = out.argmax(1).cpu().numpy()
+
             preds.extend(p)
             trues.extend(y.numpy())
 
-    print(f"\n{name} Classification Report")
-    # SAFE EVALUATION: Forces reporting of all 5 classes
-    print(classification_report(trues, preds,
-                                labels=[0, 1, 2, 3, 4],
-                                target_names=["Wake", "N1", "N2", "N3", "REM"],
-                                digits=3,
-                                zero_division=0))
-    print(f"\n{name} Confusion Matrix")
-    print(confusion_matrix(trues, preds))
+    report = classification_report(
+        trues,
+        preds,
+        labels=[0,1,2,3,4],
+        target_names=["Wake","N1","N2","N3","REM"],
+        digits=3,
+        output_dict=True,
+        zero_division=0
+    )
+
+    print(f"\n{name} Classification Report\n")
+
+    print(classification_report(
+        trues,
+        preds,
+        labels=[0,1,2,3,4],
+        target_names=["Wake","N1","N2","N3","REM"],
+        digits=3,
+        zero_division=0
+    ))
+
+    cm = confusion_matrix(trues,preds)
+
+    accuracy = report["accuracy"]
+    macro_f1 = report["macro avg"]["f1-score"]
+
+    return accuracy,macro_f1,cm
+
 
 # =========================================================
-# PIPELINE
+# RESULT PLOTTING
+# =========================================================
+def plot_results(results):
+
+    models=list(results.keys())
+
+    acc=[results[m]["accuracy"] for m in models]
+
+    f1=[results[m]["f1"] for m in models]
+
+    # Accuracy chart
+    plt.figure()
+
+    sns.barplot(x=models,y=acc)
+
+    plt.title("Model Accuracy Comparison")
+
+    plt.ylabel("Accuracy")
+
+    plt.show()
+
+    # F1 chart
+    plt.figure()
+
+    sns.barplot(x=models,y=f1)
+
+    plt.title("Model Macro F1 Comparison")
+
+    plt.ylabel("Macro F1")
+
+    plt.show()
+
+    # Confusion matrices
+
+    classes=["Wake","N1","N2","N3","REM"]
+
+    for model in models:
+
+        plt.figure(figsize=(6,5))
+
+        sns.heatmap(
+            results[model]["cm"],
+            annot=True,
+            fmt="d",
+            xticklabels=classes,
+            yticklabels=classes,
+            cmap="Blues"
+        )
+
+        plt.title(f"{model} Confusion Matrix")
+
+        plt.ylabel("True")
+
+        plt.xlabel("Predicted")
+
+        plt.show()
+
+
+# =========================================================
+# TRAIN PIPELINE
 # =========================================================
 def train_pipeline():
-    if not os.path.exists(META_FILE):
-        print("❌ Metadata not found. You must run preprocess() first!")
-        return
 
-    df = pd.read_csv(META_FILE)
-    print("\nDataset Class Distribution:")
+    df=pd.read_csv(META_FILE)
+
+    print("Dataset distribution")
+
     print(df["label"].value_counts().sort_index())
 
-    label_counts = df["label"].value_counts().sort_index().reindex([0,1,2,3,4], fill_value=1)
-    weights = 1.0 / label_counts
-    weights = weights / weights.mean()
-    class_weights = torch.tensor(weights.values, dtype=torch.float32)
+    label_counts=df["label"].value_counts().sort_index().reindex([0,1,2,3,4],fill_value=1)
 
-    df = shuffle(df, random_state=42)
-    train_val, test = train_test_split(df, test_size=0.20, stratify=df["label"], random_state=42)
-    train, val = train_test_split(train_val, test_size=0.125, stratify=train_val["label"], random_state=42)
+    weights=1/label_counts
 
-    # WINDOWS SAFETY: num_workers=0
-    train_loader = DataLoader(SleepDataset(train, augment=True), batch_size=16, shuffle=True, num_workers=0)
-    val_loader = DataLoader(SleepDataset(val), batch_size=16, shuffle=False, num_workers=0)
-    test_loader = DataLoader(SleepDataset(test), batch_size=16, shuffle=False, num_workers=0)
+    weights=weights/weights.mean()
 
-    print(f"\nDataset sizes → Train: {len(train):,} | Val: {len(val):,} | Test: {len(test):,}")
+    class_weights=torch.tensor(weights.values,dtype=torch.float32)
 
-    print("\n--- Training CNN ---")
-    cnn = CNN()
-    cnn = train_model(cnn, train_loader, val_loader, class_weights, epochs=30)
-    evaluate(cnn, test_loader, "CNN")
-    torch.save(cnn.state_dict(), os.path.join(OUTPUT_DIR, "model_cnn.pth"))
+    df=shuffle(df,random_state=42)
 
-    print("\n--- Training Enhanced ViT (GPU Mode) ---")
-    vit = EnhancedViT()
-    vit = train_model(vit, train_loader, val_loader, class_weights, epochs=30)
-    evaluate(vit, test_loader, "ViT")
-    torch.save(vit.state_dict(), os.path.join(OUTPUT_DIR, "model_vit.pth"))
+    train_val,test=train_test_split(
+        df,
+        test_size=0.2,
+        stratify=df["label"],
+        random_state=42
+    )
+
+    train,val=train_test_split(
+        train_val,
+        test_size=0.125,
+        stratify=train_val["label"],
+        random_state=42
+    )
+
+    train_loader=DataLoader(
+        SleepDataset(train,augment=True),
+        batch_size=32,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        persistent_workers=True
+    )
+
+    val_loader=DataLoader(
+        SleepDataset(val),
+        batch_size=32,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        persistent_workers=True
+    )
+
+    test_loader=DataLoader(
+        SleepDataset(test),
+        batch_size=32,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        persistent_workers=True
+    )
+
+    print(f"\nTrain {len(train)} | Val {len(val)} | Test {len(test)}")
+
+    results={}
+
+    # =====================================================
+    # TRAIN VIT FIRST
+    # =====================================================
+
+    print("\nTraining ViT")
+
+    vit=EnhancedViT()
+
+    vit=train_model(vit,train_loader,val_loader,class_weights)
+
+    acc,f1,cm=evaluate(vit,test_loader,"ViT")
+
+    torch.save(vit.state_dict(),OUTPUT_DIR/"model_vit.pth")
+
+    results["ViT"]={
+        "accuracy":acc,
+        "f1":f1,
+        "cm":cm
+    }
+
+    # =====================================================
+    # TRAIN CNN SECOND
+    # =====================================================
+
+    print("\nTraining CNN")
+
+    cnn=CNN()
+
+    cnn=train_model(cnn,train_loader,val_loader,class_weights)
+
+    acc,f1,cm=evaluate(cnn,test_loader,"CNN")
+
+    torch.save(cnn.state_dict(),OUTPUT_DIR/"model_cnn.pth")
+
+    results["CNN"]={
+        "accuracy":acc,
+        "f1":f1,
+        "cm":cm
+    }
+
+    # =====================================================
+    # PLOT RESULTS
+    # =====================================================
+
+    plot_results(results)
+
 
 # =========================================================
 # MAIN EXECUTION
 # =========================================================
-if __name__ == "__main__":
-    print("🚀 Script Initialized...")
-    preprocess()
+if __name__=="__main__":
 
-    # 2. RUN TRAINING IMMEDIATELY AFTER
-    print("\n✅ Preprocessing complete. Now starting TRAINING...")
+    
+    if not os.path.exists(META_FILE):
+        print("Starting preprocessing")
+        preprocess()
+
+    print("Starting training")
+
     train_pipeline()
-
-
-# =========================================================
-# MANUAL DATA ENTRY (From your results above)
-# =========================================================
-# I copied these numbers directly from your CNN Confusion Matrix output
-cnn_cm = np.array([
-    [609,  18,   6,   8,  50],  # Wake
-    [  8,  57,  31,   0,  56],  # N1
-    [  9,  46, 384,  94, 127],  # N2
-    [  1,   0,  21, 113,   4],  # N3
-    [ 14,  10,  19,   5, 152]   # REM
-])
-
-classes = ["Wake", "N1", "N2", "N3", "REM"]
