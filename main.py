@@ -1,5 +1,3 @@
-from google.colab import drive
-
 import os
 import gc
 import random
@@ -22,8 +20,6 @@ import pywt
 from scipy.signal import butter, filtfilt
 import seaborn as sns
 import matplotlib.pyplot as plt
-
-drive.mount('/content/drive')
 
 print(f"Torch Version: {torch.__version__}")
 print(f"CUDA Available: {torch.cuda.is_available()}")
