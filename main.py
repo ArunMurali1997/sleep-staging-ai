@@ -29,7 +29,8 @@ if torch.cuda.is_available():
 else:
     print("Still not seeing GPU.")
 
-BASE_DIR = Path("/content/drive/MyDrive/sleep_model")
+# BASE_DIR = Path("/content/drive/MyDrive/sleep_model")
+BASE_DIR = Path("/content/sleep_model")
 # UPDATED FOR YOUR FOLDER NAMES (Data/edf)
 EDF_DIR    = BASE_DIR / "Data" / "edf"
 XML_DIR    = BASE_DIR /  "Data" / "annot"
@@ -329,7 +330,7 @@ class EnhancedViT(nn.Module):
 import multiprocessing
 torch.set_num_threads(multiprocessing.cpu_count())
 
-NUM_WORKERS = 2
+NUM_WORKERS = 4
 
 # =========================================================
 # TRAIN FUNCTION
