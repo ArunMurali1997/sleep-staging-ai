@@ -19,7 +19,12 @@ COPY requirements.txt .
 
 
 RUN pip install --upgrade pip
-RUN pip install --index-url https://download.pytorch.org/whl/cu121 -r requirements.txt
+
+# Install PyTorch with CUDA support
+RUN pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+
+# Install remaining packages
+RUN pip install -r requirements.txt
 
 COPY . .
 
