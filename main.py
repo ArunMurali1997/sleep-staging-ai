@@ -329,7 +329,7 @@ class EnhancedViT(nn.Module):
 import multiprocessing
 torch.set_num_threads(multiprocessing.cpu_count())
 
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 
 # =========================================================
 # TRAIN FUNCTION
