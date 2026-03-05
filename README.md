@@ -235,6 +235,15 @@ pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https
 pip install -r requirements.txt
 ```
 
+before running the script move the file to 
+
+```
+#in google collab
+!mkdir /content/sleep_model/output
+!rsync -av /content/drive/MyDrive/sleep_model/output/ /content/sleep_model/output/
+
+```
+
 Run the training script:
 
 ```
