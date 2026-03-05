@@ -238,8 +238,19 @@ pip install -r requirements.txt
 before running the script move the file to 
 
 ```
-#in google collab
-!mkdir /content/sleep_model/output
+#In google collab
+
+## mount google drive
+from google.colab import drive
+drive.mount('/content/drive', force_remount=True)
+
+## copy file form drive to collab
+!mkdir -p /content/sleep_model/Data/annot
+!mkdir -p /content/sleep_model/Data/edf
+!mkdir -p /content/sleep_model/output
+
+!rsync -av /content/drive/MyDrive/sleep_model/Data/annot/ /content/sleep_model/Data/annot/
+!rsync -av /content/drive/MyDrive/sleep_model/Data/edf/ /content/sleep_model/Data/edf/
 !rsync -av /content/drive/MyDrive/sleep_model/output/ /content/sleep_model/output/
 
 ```
