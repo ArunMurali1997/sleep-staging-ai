@@ -2,21 +2,18 @@
 
 ## Overview
 
-This project implements an **automatic sleep stage classification system** using EEG signals from the **MESA Sleep Dataset**.
-The pipeline processes raw EEG recordings and classifies sleep into **five stages** using deep learning models.
+This project implements an **automatic sleep stage classification system** using EEG signals from the **MESA Sleep Dataset**. The pipeline converts raw EEG recordings into spectrogram representations using **Continuous Wavelet Transform (CWT)** and trains deep learning models to classify sleep stages.
 
-The system compares two architectures:
+Two deep learning architectures are implemented and compared:
 
-* Convolutional Neural Network (CNN)
-* Vision Transformer (ViT)
+* **Vision Transformer (ViT)**
+* **Convolutional Neural Network (CNN)**
 
-The EEG signals are converted into **Continuous Wavelet Transform (CWT) spectrograms**, which are used as input images for the models.
+The system predicts **five sleep stages** from EEG recordings.
 
 ---
 
 # Sleep Stages
-
-The model predicts the following sleep stages:
 
 | Label | Stage |
 | ----- | ----- |
@@ -26,7 +23,7 @@ The model predicts the following sleep stages:
 | 3     | N3    |
 | 4     | REM   |
 
-Each EEG signal is segmented into **30-second epochs**.
+Each EEG recording is segmented into **30-second epochs** before training.
 
 ---
 
@@ -34,12 +31,12 @@ Each EEG signal is segmented into **30-second epochs**.
 
 ## 1. Data Loading
 
-* EEG recordings are read from **EDF files**
-* Sleep stage annotations are parsed from **XML files**
+* EEG recordings are loaded from **EDF files**
+* Sleep annotations are parsed from **XML files**
 
-## 2. Signal Preprocessing
+## 2. Signal Processing
 
-The EEG signal undergoes:
+The EEG signal is processed using:
 
 * Resampling to **128 Hz**
 * **Bandpass filtering (1–32 Hz)**
@@ -47,15 +44,13 @@ The EEG signal undergoes:
 
 ## 3. Feature Extraction
 
-Each epoch is converted into a **CWT spectrogram** using the **Morlet wavelet**.
+Each epoch is transformed into a **CWT spectrogram image** using the Morlet wavelet.
 
-Output tensor size:
+Model input size:
 
-```
+```text
 3 × 96 × 96
 ```
-
-These spectrogram images are used as model input.
 
 ---
 
@@ -69,7 +64,7 @@ These spectrogram images are used as model input.
 | N3    | 694     |
 | REM   | 1002    |
 
-Total epochs used for training:
+Total epochs used:
 
 ```
 9207
@@ -77,17 +72,19 @@ Total epochs used for training:
 
 Dataset split:
 
-| Split      | Size |
-| ---------- | ---- |
-| Train      | 6444 |
-| Validation | 921  |
-| Test       | 1842 |
+| Split      | Samples |
+| ---------- | ------- |
+| Train      | 6444    |
+| Validation | 921     |
+| Test       | 1842    |
 
 ---
 
 # Model Architectures
 
-## CNN Architecture
+## CNN
+
+Architecture:
 
 ```
 Conv2D → ReLU → MaxPool
@@ -109,7 +106,7 @@ Configuration:
 | ------------------- | ----- |
 | Patch Size          | 8     |
 | Embedding Dimension | 256   |
-| Transformer Depth   | 8     |
+| Transformer Layers  | 8     |
 | Attention Heads     | 8     |
 
 Pipeline:
@@ -132,7 +129,7 @@ Patch Embedding
 | Optimizer     | AdamW                           |
 | Learning Rate | 3e-4                            |
 | Scheduler     | Cosine Annealing                |
-| Loss Function | CrossEntropy with class weights |
+| Loss          | CrossEntropy with class weights |
 
 Early stopping is applied using **validation macro F1 score**.
 
@@ -140,29 +137,19 @@ Early stopping is applied using **validation macro F1 score**.
 
 # Results
 
-## Vision Transformer (ViT)
+## Vision Transformer
 
 Accuracy
 
 ```
-71.0%
+71%
 ```
 
 Macro F1 Score
 
 ```
-0.622
+0.62
 ```
-
-| Stage | Precision | Recall | F1    |
-| ----- | --------- | ------ | ----- |
-| Wake  | 0.944     | 0.899  | 0.921 |
-| N1    | 0.319     | 0.487  | 0.385 |
-| N2    | 0.797     | 0.602  | 0.686 |
-| N3    | 0.625     | 0.576  | 0.599 |
-| REM   | 0.417     | 0.680  | 0.517 |
-
----
 
 ## CNN
 
@@ -175,34 +162,17 @@ Accuracy
 Macro F1 Score
 
 ```
-0.582
+0.58
 ```
 
-| Stage | Precision | Recall | F1    |
-| ----- | --------- | ------ | ----- |
-| Wake  | 0.920     | 0.883  | 0.901 |
-| N1    | 0.292     | 0.612  | 0.396 |
-| N2    | 0.830     | 0.400  | 0.540 |
-| N3    | 0.594     | 0.705  | 0.645 |
-| REM   | 0.328     | 0.620  | 0.429 |
-
----
-
-# Model Comparison
-
-| Model | Accuracy | Macro F1 |
-| ----- | -------- | -------- |
-| ViT   | **71%**  | **0.62** |
-| CNN   | 64.5%    | 0.58     |
-
-The **Vision Transformer performs better** than the CNN model for sleep stage classification.
+Vision Transformer achieved **better performance than CNN** for sleep stage classification.
 
 ---
 
 # Project Structure
 
 ```
-sleep_model/
+sleep-staging-ai/
 │
 ├── Data/
 │   ├── edf/
@@ -223,68 +193,98 @@ sleep_model/
 
 # Installation
 
-Clone the repository
+Clone the repository:
 
 ```
-git clone https://github.com/yourusername/sleep-stage-classification.git
-cd sleep-stage-classification
-```
-
-Upgrade pip
-
-```
-pip install --upgrade pip
-```
-
-Install dependencies using the requirements file
-
-```
-RUN pip install --index-url https://download.pytorch.org/whl/cu121 -r requirements.txt
+git clone https://github.com/ArunMurali1997/sleep-staging-ai.git
+cd sleep-staging-ai
 ```
 
 ---
 
-# Running the Project
+# CPU Installation
 
-Run the main script:
+Install dependencies for CPU environments:
+
+```
+pip install --upgrade pip
+pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+```
+
+Run the training script:
 
 ```
 python main.py
 ```
 
-The pipeline will automatically:
-
-1. Preprocess EDF files
-2. Generate CWT spectrograms
-3. Train ViT model
-4. Train CNN model
-5. Evaluate performance
-6. Generate plots
+CPU training works but will be **significantly slower**.
 
 ---
 
-# Hardware
+# GPU Installation (Recommended)
 
-Recommended hardware:
+Enable GPU support and install CUDA-enabled PyTorch.
+
+Install dependencies:
 
 ```
-GPU: NVIDIA Tesla T4 or better
-RAM: 12GB+
+pip install --upgrade pip
+
+pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+
+pip install -r requirements.txt
 ```
 
-Training on CPU is possible but significantly slower.
+Run the training script:
+
+```
+python main.py
+```
+
+---
+
+# Verify GPU
+
+After installation you can check GPU availability:
+
+```python
+import torch
+
+print("Torch:", torch.__version__)
+print("CUDA Available:", torch.cuda.is_available())
+
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+```
+
+Expected output on GPU:
+
+```
+CUDA Available: True
+GPU: Tesla T4
+```
+
+---
+
+# Hardware Recommendation
+
+| Hardware | Recommendation     |
+| -------- | ------------------ |
+| CPU      | Supported but slow |
+| GPU      | Tesla T4 or better |
+| RAM      | 12 GB+             |
 
 ---
 
 # Applications
 
-This system can be applied to:
+This project can be used for:
 
 * Automated sleep scoring
-* Sleep disorder diagnosis
+* Sleep disorder detection
 * Clinical sleep monitoring
-* Wearable sleep tracking devices
 * AI-assisted sleep analysis
+* Wearable sleep tracking systems
 
 ---
 
