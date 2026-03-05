@@ -481,6 +481,30 @@ def evaluate(model, loader, name):
 
     cm = confusion_matrix(trues,preds)
 
+    # =============================
+    # PLOT CONFUSION MATRIX
+    # =============================
+    classes=["Wake","N1","N2","N3","REM"]
+
+    plt.figure(figsize=(6,5))
+
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=classes,
+        yticklabels=classes
+    )
+
+    plt.title(f"{name} Confusion Matrix")
+
+    plt.xlabel("Predicted")
+
+    plt.ylabel("True")
+
+    plt.show()
+
     accuracy = report["accuracy"]
     macro_f1 = report["macro avg"]["f1-score"]
 
