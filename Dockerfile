@@ -14,8 +14,12 @@ RUN apt-get update && apt-get install -y \
 
 COPY requirements.txt .
 
+# RUN pip install --upgrade pip
+# RUN pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+
+
 RUN pip install --upgrade pip
-RUN pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+RUN pip install --index-url https://download.pytorch.org/whl/cu121 -r requirements.txt
 
 COPY . .
 
