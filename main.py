@@ -20,6 +20,7 @@ import pywt
 from scipy.signal import butter, filtfilt
 import seaborn as sns
 import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score
 
 print(f"Torch Version: {torch.__version__}")
 print(f"CUDA Available: {torch.cuda.is_available()}")
@@ -439,77 +440,49 @@ def train_model(model, train_loader, val_loader, class_weights, epochs=30, patie
 # EVALUATION FUNCTION
 # =========================================================
 def evaluate(model, loader, name):
-
     model.eval()
-
-    preds=[]
-    trues=[]
+    preds = []
+    trues = []
 
     with torch.no_grad():
-
-        for x,y in loader:
-
+        for x, y in loader:
             x = x.to(DEVICE)
-
             out = model(x)
-
             p = out.argmax(1).cpu().numpy()
-
             preds.extend(p)
             trues.extend(y.numpy())
 
-    report = classification_report(
-        trues,
-        preds,
-        labels=[0,1,2,3,4],
-        target_names=["Wake","N1","N2","N3","REM"],
-        digits=3,
-        output_dict=True,
-        zero_division=0
+    classes = ["Wake", "N1", "N2", "N3", "REM"]
+    cm = confusion_matrix(trues, preds)
+
+    # 1. PRINT TEXT MATRIX TO TERMINAL
+    cm_df = pd.DataFrame(
+        cm, 
+        index=[f"Actual_{c:4}" for c in classes], 
+        columns=[f"Pred_{c:4}" for c in classes]
     )
+    
+    print(f"\n" + "="*50)
+    print(f" RAW CONFUSION MATRIX: {name}")
+    print("="*50)
+    print(cm_df)
+    print("="*50)
 
-    print(f"\n{name} Classification Report\n")
+    # 2. PRINT CLASSIFICATION REPORT
+    print(f"\n{name} Detailed Metrics:")
+    print(classification_report(trues, preds, target_names=classes, digits=3, zero_division=0))
 
-    print(classification_report(
-        trues,
-        preds,
-        labels=[0,1,2,3,4],
-        target_names=["Wake","N1","N2","N3","REM"],
-        digits=3,
-        zero_division=0
-    ))
+    # 3. GENERATE VISUAL HEATMAP (Optional - keeps it in Colab output)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes, yticklabels=classes)
+    plt.title(f"{name} Visual Confusion Matrix")
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.show() 
 
-    cm = confusion_matrix(trues,preds)
-
-    # =============================
-    # PLOT CONFUSION MATRIX
-    # =============================
-    classes=["Wake","N1","N2","N3","REM"]
-
-    plt.figure(figsize=(6,5))
-
-    sns.heatmap(
-        cm,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        xticklabels=classes,
-        yticklabels=classes
-    )
-
-    plt.title(f"{name} Confusion Matrix")
-
-    plt.xlabel("Predicted")
-
-    plt.ylabel("True")
-
-    plt.show()
-
-    accuracy = report["accuracy"]
-    macro_f1 = report["macro avg"]["f1-score"]
-
-    return accuracy,macro_f1,cm
-
+    acc = accuracy_score(trues, preds)
+    f1 = f1_score(trues, preds, average="macro")
+    return acc, f1, cm
 
 # =========================================================
 # RESULT PLOTTING
