@@ -629,16 +629,3 @@ def train_pipeline():
     plot_results(results)
 
 
-# =========================================================
-# MAIN EXECUTION
-# =========================================================
-if __name__=="__main__":
-
-    
-    if not os.path.exists(META_FILE):
-        print("Starting preprocessing")
-        preprocess()
-
-    print("Starting training")
-
-    train_pipeline()
