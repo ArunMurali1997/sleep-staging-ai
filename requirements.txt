@@ -11,4 +11,3 @@ seaborn
 matplotlib
 tqdm
 lxml
-pywavelets
