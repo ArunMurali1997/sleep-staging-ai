@@ -629,3 +629,47 @@ def train_pipeline():
     plot_results(results)
 
 
+def get_data_loaders():
+
+    df = pd.read_csv(META_FILE)
+
+    label_counts = df["label"].value_counts().sort_index().reindex([0,1,2,3,4],fill_value=1)
+
+    weights = 1 / label_counts
+    weights = weights / weights.mean()
+
+    class_weights = torch.tensor(weights.values, dtype=torch.float32)
+
+    df = shuffle(df, random_state=42)
+
+    train_val, test = train_test_split(
+        df,
+        test_size=0.2,
+        stratify=df["label"],
+        random_state=42
+    )
+
+    train, val = train_test_split(
+        train_val,
+        test_size=0.125,
+        stratify=train_val["label"],
+        random_state=42
+    )
+
+    train_loader = DataLoader(
+        SleepDataset(train, augment=True),
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=True
+    )
+
+    test_loader = DataLoader(
+        SleepDataset(test),
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=True
+    )
+
+    return train_loader, test_loader, class_weights

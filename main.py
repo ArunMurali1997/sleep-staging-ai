@@ -1,6 +1,6 @@
 import argparse
 
-from train_models import train_pipeline
+from train_models import train_pipeline, get_data_loaders
 from distillation_train import train_distillation
 
 def main():
@@ -21,7 +21,8 @@ def main():
 
     elif args.mode == "distill":
         print("Running knowledge distillation")
-        train_distillation()
+        train_loader, test_loader, class_weights = get_data_loaders()
+        train_distillation(train_loader, test_loader, class_weights)
 
 if __name__ == "__main__":
     main()
