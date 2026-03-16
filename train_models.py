@@ -520,6 +520,9 @@ def plot_results(results):
 # TRAIN PIPELINE
 # =========================================================
 def train_pipeline():
+    if not os.path.exists(META_FILE):
+        print("Starting preprocessing")
+        preprocess()
 
     df=pd.read_csv(META_FILE)
 
