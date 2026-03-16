@@ -1,18 +1,14 @@
-import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from train_models import CNN, EnhancedViT, evaluate, preprocess
+from train_models import CNN, EnhancedViT, evaluate
 from config.config import OUTPUT_DIR, DEVICE, EPOCHS, ALPHA, T, META_FILE
 
 
 def train_distillation(train_loader, test_loader, class_weights):
-
-    if not os.path.exists(META_FILE):
-        print("Starting preprocessing")
-        preprocess()
 
     print("\n=================================")
     print("Step 1: Load Teacher and Student")
