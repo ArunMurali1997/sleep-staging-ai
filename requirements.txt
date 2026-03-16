@@ -10,3 +10,5 @@ scipy
 seaborn
 matplotlib
 tqdm
+lxml
+pywavelets
