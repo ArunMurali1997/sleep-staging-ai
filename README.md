@@ -313,3 +313,14 @@ This project can be used for:
 Arun Murali
 
 Machine Learning Project — Sleep Stage Classification using Deep Learning
+
+
+
+
+### Run command 
+
+```
+python main.py --mode train
+python main.py --mode distill
+
+```
