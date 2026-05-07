@@ -76,7 +76,7 @@ STAGE_REMAP = {
 # =========================================================
 
 BATCH_SIZE = 32
-NUM_WORKERS = 4
+NUM_WORKERS = 2
 EPOCHS = 30
 
 T = 4
@@ -792,8 +792,17 @@ def evaluate(model, loader, name):
 
 def train_pipeline():
 
-    if not os.path.exists(META_FILE):
+    cache_files = list(CACHE_DIR.glob("*.pt"))
+
+    if (
+        not META_FILE.exists()
+        or not CACHE_DIR.exists()
+        or len(cache_files) == 0
+    ):
+        print("Preprocessed cache not found. Running preprocessing...")
         preprocess()
+    else:
+        print(f"Using existing preprocessing cache ({len(cache_files)} files)")
 
     df = pd.read_csv(META_FILE)
 
