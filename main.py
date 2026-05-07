@@ -99,7 +99,6 @@ if torch.cuda.is_available():
 # UTILS
 # =========================================================
 
-
 def tensor_hash(t):
     return hashlib.sha1(t.numpy().tobytes()).hexdigest()
 
@@ -119,7 +118,6 @@ def remap_labels(labels):
             remapped.append(-1)
 
     return remapped
-
 
 
 def parse_first_stage_from_xml(xml_path):
@@ -150,7 +148,6 @@ def parse_first_stage_from_xml(xml_path):
         print(f"XML parse error: {e}")
 
     return None
-
 
 
 def parse_sleep_stages(xml_path):
@@ -233,7 +230,6 @@ def expand_annotations_to_epochs(annotations):
     return np.array(epoch_labels)
 
 
-
 def compute_cwt(epoch):
 
     stack = []
@@ -287,10 +283,8 @@ def preprocess():
     edfs = sorted(Path(EDF_DIR).glob("*.edf"))
 
     if not edfs:
-        print("❌ ERROR: No EDF files found")
+        print("No EDF files found")
         return
-
-    print(f"Found {len(edfs)} EDF files")
 
     metadata = []
     sid = 0
@@ -520,7 +514,6 @@ def preprocess():
 # DATASET
 # =========================================================
 
-
 class SleepDataset(Dataset):
 
     def __init__(self, df, augment=False):
@@ -608,7 +601,12 @@ class EnhancedViT(nn.Module):
 
         num_patches = (img_size // patch) ** 2
 
-        self.patch_embed = nn.Conv2d(3, dim, patch, patch)
+        self.patch_embed = nn.Conv2d(
+            3,
+            dim,
+            patch,
+            patch,
+        )
 
         self.cls_token = nn.Parameter(
             torch.randn(1, 1, dim) * 0.02
@@ -663,8 +661,12 @@ class EnhancedViT(nn.Module):
 # TRAINING
 # =========================================================
 
-
-def train_model(model, train_loader, val_loader, class_weights):
+def train_model(
+    model,
+    train_loader,
+    val_loader,
+    class_weights,
+):
 
     model.to(DEVICE)
 
@@ -685,8 +687,6 @@ def train_model(model, train_loader, val_loader, class_weights):
 
         model.train()
 
-        total_loss = 0
-
         for x, y in train_loader:
 
             x = x.to(DEVICE)
@@ -701,8 +701,6 @@ def train_model(model, train_loader, val_loader, class_weights):
             loss.backward()
 
             optimizer.step()
-
-            total_loss += loss.item() * x.size(0)
 
         model.eval()
 
@@ -862,7 +860,7 @@ def train_pipeline():
         class_weights,
     )
 
-    acc, f1, cm = evaluate(vit, test_loader, "ViT")
+    evaluate(vit, test_loader, "ViT")
 
     torch.save(
         vit.state_dict(),
@@ -880,26 +878,188 @@ def train_pipeline():
         class_weights,
     )
 
-    acc, f1, cm = evaluate(cnn, test_loader, "CNN")
+    evaluate(cnn, test_loader, "CNN")
 
     torch.save(
         cnn.state_dict(),
         OUTPUT_DIR / "model_cnn.pth",
     )
 
+    return class_weights
+
+
+# =========================================================
+# GET DATA LOADERS
+# =========================================================
+
+def get_data_loaders():
+
+    df = pd.read_csv(META_FILE)
+
+    df = shuffle(df, random_state=42)
+
+    train_val, test = train_test_split(
+        df,
+        test_size=0.2,
+        stratify=df["label"],
+        random_state=42,
+    )
+
+    train, val = train_test_split(
+        train_val,
+        test_size=0.125,
+        stratify=train_val["label"],
+        random_state=42,
+    )
+
+    train_loader = DataLoader(
+        SleepDataset(train, augment=True),
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+    )
+
+    test_loader = DataLoader(
+        SleepDataset(test),
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+    )
+
+    return train_loader, test_loader
+
+
+# =========================================================
+# KNOWLEDGE DISTILLATION
+# =========================================================
+
+def train_distillation(
+    train_loader,
+    test_loader,
+    class_weights,
+):
+
+    print("\nKnowledge Distillation")
+
+    teacher = EnhancedViT().to(DEVICE)
+
+    teacher.load_state_dict(
+        torch.load(
+            OUTPUT_DIR / "model_vit.pth",
+            map_location=DEVICE,
+        )
+    )
+
+    teacher.eval()
+
+    student = CNN().to(DEVICE)
+
+    try:
+
+        student.load_state_dict(
+            torch.load(
+                OUTPUT_DIR / "model_cnn.pth",
+                map_location=DEVICE,
+            )
+        )
+
+        print("Loaded pretrained CNN")
+
+    except:
+        print("Using fresh CNN")
+
+    for p in teacher.parameters():
+        p.requires_grad = False
+
+    optimizer = optim.AdamW(
+        student.parameters(),
+        lr=3e-4,
+    )
+
+    ce_loss = nn.CrossEntropyLoss(
+        weight=class_weights.to(DEVICE)
+    )
+
+    kl_loss = nn.KLDivLoss(
+        reduction="batchmean"
+    )
+
+    for epoch in range(EPOCHS):
+
+        student.train()
+
+        total_loss = 0
+
+        for x, y in train_loader:
+
+            x = x.to(DEVICE)
+            y = y.to(DEVICE)
+
+            optimizer.zero_grad()
+
+            with torch.no_grad():
+                teacher_logits = teacher(x)
+
+            student_logits = student(x)
+
+            loss_ce = ce_loss(student_logits, y)
+
+            loss_kd = kl_loss(
+                F.log_softmax(student_logits / T, dim=1),
+                F.softmax(teacher_logits / T, dim=1),
+            ) * (T * T)
+
+            loss = (
+                ALPHA * loss_ce
+                + (1 - ALPHA) * loss_kd
+            )
+
+            loss.backward()
+
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        print(
+            f"Epoch {epoch+1}/{EPOCHS} "
+            f"| Loss {total_loss/len(train_loader):.4f}"
+        )
+
+    evaluate(
+        student,
+        test_loader,
+        "Distilled CNN",
+    )
+
+    torch.save(
+        student.state_dict(),
+        OUTPUT_DIR / "model_cnn_distilled.pth",
+    )
+
+    print("Distilled model saved")
+
 
 # =========================================================
 # MAIN
 # =========================================================
 
-
 def main():
 
     print("Torch Version:", torch.__version__)
+
     print("CUDA Available:", torch.cuda.is_available())
+
     print("Device:", DEVICE)
 
-    train_pipeline()
+    class_weights = train_pipeline()
+
+    train_loader, test_loader = get_data_loaders()
+
+    train_distillation(
+        train_loader,
+        test_loader,
+        class_weights,
+    )
 
 
 if __name__ == "__main__":
