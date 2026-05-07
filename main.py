@@ -13,19 +13,17 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, f1_score
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    accuracy_score,
+)
 from sklearn.utils import shuffle
 import mne
 import pywt
-from scipy.signal import butter, filtfilt
 import seaborn as sns
 import matplotlib.pyplot as plt
-from sklearn.metrics import accuracy_score
-
-
-
-#============================START CONFIG============================
-# CONFIG Start
 
 
 # =========================================================
@@ -53,8 +51,8 @@ TARGET_FS = 128
 EPOCH_SEC = 30
 SAMPLES_PER_EPOCH = TARGET_FS * EPOCH_SEC
 
-LOWCUT = 1.0
-HIGHCUT = 32.0
+LOWCUT = 0.3
+HIGHCUT = 40.0
 
 IMG_SIZE = (96, 96)
 CHANNEL_NAMES = ["EEG1", "EEG2", "EEG3"]
@@ -62,200 +60,469 @@ CHANNEL_NAMES = ["EEG1", "EEG2", "EEG3"]
 SCALES = np.arange(1, 32)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BATCH_SIZE = 32
-NUM_WORKERS = 4
-EPOCHS = 30
+KEEP_WAKE_EPOCHS = 2
+
+STAGE_REMAP = {
+    0: 0,
+    1: 1,
+    2: 2,
+    3: 3,
+    5: 4,
+}
 
 
 # =========================================================
 # TRAINING CONFIG
 # =========================================================
 
+BATCH_SIZE = 32
+NUM_WORKERS = 4
+EPOCHS = 30
+
 T = 4
 ALPHA = 0.5
-# CONFIG End
-#============================END CONFIG============================
 
 
-
-#============================START (CNN AND VIT TRAINING)============================
-# CNN and Vit training code is in train_models.py START
-
-print(f"Torch Version: {torch.__version__}")
-print(f"CUDA Available: {torch.cuda.is_available()}")
-
-print("Device:", DEVICE)
-
-if DEVICE.type == "cuda":
-    print("GPU:", torch.cuda.get_device_name(0))
-
-print("EDF DIR:", EDF_DIR)
-print("XML DIR:", XML_DIR)
-print("EDF FILES:", list(Path(EDF_DIR).glob("*.edf")))
-
+# =========================================================
+# RANDOM SEED
+# =========================================================
 
 random.seed(42)
 np.random.seed(42)
 torch.manual_seed(42)
+
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
 
-def bandpass_filter(signal):
-    nyq = TARGET_FS / 2.0
-    b, a = butter(5, [LOWCUT/nyq, HIGHCUT/nyq], btype="band")
-    return filtfilt(b, a, signal.astype(np.float64))
+
+# =========================================================
+# UTILS
+# =========================================================
+
 
 def tensor_hash(t):
     return hashlib.sha1(t.numpy().tobytes()).hexdigest()
 
-def parse_xml(xml_path, total_epochs):
-    labels = np.full(total_epochs, -1, dtype=int)
+
+# =========================================================
+# MESA PREPROCESSING
+# =========================================================
+
+
+def remap_labels(labels):
+    remapped = []
+
+    for lbl in labels:
+        if lbl in STAGE_REMAP:
+            remapped.append(STAGE_REMAP[lbl])
+        else:
+            remapped.append(-1)
+
+    return remapped
+
+
+
+def parse_first_stage_from_xml(xml_path):
+    try:
+        tree = ET.parse(str(xml_path))
+        root = tree.getroot()
+
+        for event in root.findall(".//ScoredEvent"):
+
+            start_el = event.find("Start")
+            duration_el = event.find("Duration")
+            type_el = event.find("EventType")
+            concept_el = event.find("EventConcept")
+
+            if None in (start_el, duration_el, type_el, concept_el):
+                continue
+
+            if "Stages|Stages" not in (type_el.text or ""):
+                continue
+
+            return (
+                float(start_el.text),
+                float(duration_el.text),
+                concept_el.text or "",
+            )
+
+    except Exception as e:
+        print(f"XML parse error: {e}")
+
+    return None
+
+
+
+def parse_sleep_stages(xml_path):
+
+    annotations = []
 
     try:
-        tree = ET.parse(xml_path)
+        tree = ET.parse(str(xml_path))
         root = tree.getroot()
+
+        for event in root.findall(".//ScoredEvent"):
+
+            start_el = event.find("Start")
+            duration_el = event.find("Duration")
+            type_el = event.find("EventType")
+            concept_el = event.find("EventConcept")
+
+            if None in (start_el, duration_el, type_el, concept_el):
+                continue
+
+            if "Stages|Stages" not in (type_el.text or ""):
+                continue
+
+            annotations.append({
+                "start": float(start_el.text),
+                "duration": float(duration_el.text),
+                "stage": (concept_el.text or "").strip(),
+            })
+
     except Exception as e:
-        print("XML parse error:", e)
-        return labels
+        print(f"XML parse error: {e}")
 
-    for ev in root.findall(".//ScoredEvent"):
-        event_type = (ev.findtext("EventType") or "").upper()
-        concept = (ev.findtext("EventConcept") or "").upper()
+    annotations.sort(key=lambda x: x["start"])
 
-        # Only consider sleep stages
-        if "STAGE" not in concept and "REM" not in concept and "WAKE" not in concept:
+    return annotations
+
+
+
+def adjust_annotations_for_clip(annotations, clip_t0):
+
+    adjusted = []
+
+    for item in annotations:
+
+        start = item["start"]
+        duration = item["duration"]
+        stage = item["stage"]
+
+        end = start + duration
+
+        if end <= clip_t0:
             continue
 
-        if "WAKE" in concept:
-            stage = 0
-        elif "STAGE 1" in concept:
-            stage = 1
-        elif "STAGE 2" in concept:
-            stage = 2
-        elif "STAGE 3" in concept or "STAGE 4" in concept:
-            stage = 3
-        elif "REM" in concept:
-            stage = 4
-        else:
+        new_start = max(start, clip_t0)
+        new_duration = end - new_start
+
+        if new_duration <= 0:
             continue
 
-        start = float(ev.findtext("Start") or 0)
-        dur = float(ev.findtext("Duration") or 0)
+        adjusted.append((
+            new_start - clip_t0,
+            new_duration,
+            stage,
+        ))
 
-        start_epoch = int(start / EPOCH_SEC)
-        num_epochs = int(np.ceil(dur / EPOCH_SEC))
+    return adjusted
 
-        for i in range(num_epochs):
-            idx = start_epoch + i
-            if idx < total_epochs:
-                labels[idx] = stage
 
-    return labels
+
+def expand_annotations_to_epochs(annotations):
+
+    epoch_labels = []
+
+    for start, duration, stage in annotations:
+
+        num_epochs = int(duration // EPOCH_SEC)
+
+        epoch_labels.extend([stage] * num_epochs)
+
+    return np.array(epoch_labels)
+
+
 
 def compute_cwt(epoch):
+
     stack = []
+
     for ch in epoch:
-        sig = bandpass_filter(ch)
-        sig = (sig - sig.mean()) / (sig.std() + 1e-8)
-        coef, _ = pywt.cwt(sig, SCALES, "morl", 1.0 / TARGET_FS)
+
+        sig = ch.astype(np.float32)
+
+        sig_std = np.std(sig)
+
+        if sig_std > 0:
+            sig = (sig - np.mean(sig)) / sig_std
+
+        coef, _ = pywt.cwt(
+            sig,
+            SCALES,
+            "morl",
+            1.0 / TARGET_FS,
+        )
+
         coef = np.abs(coef)
-        coef = (coef - coef.mean()) / (coef.std() + 1e-8)
+
+        coef_std = np.std(coef)
+
+        if coef_std > 0:
+            coef = (coef - np.mean(coef)) / coef_std
+
         stack.append(coef)
+
     img = np.stack(stack, axis=0)
+
     tensor = torch.from_numpy(img).float()
+
     tensor = F.interpolate(
         tensor.unsqueeze(0),
         size=IMG_SIZE,
         mode="bilinear",
-        align_corners=False
+        align_corners=False,
     ).squeeze(0)
+
     return tensor
 
 
+# =========================================================
+# PREPROCESS
+# =========================================================
+
+
 def preprocess():
+
     edfs = sorted(Path(EDF_DIR).glob("*.edf"))
+
     if not edfs:
-        print("❌ ERROR: No .edf files found in Data/edf!")
+        print("❌ ERROR: No EDF files found")
         return
 
-    print(f"📂 Found {len(edfs)} EDF files. Starting conversion...")
+    print(f"Found {len(edfs)} EDF files")
 
     metadata = []
     sid = 0
     seen = set()
-    class_counts = {0:0, 1:0, 2:0, 3:0, 4:0}
 
-    for edf in tqdm(edfs, desc="Processing EDF files"):
+    class_counts = {
+        0: 0,
+        1: 0,
+        2: 0,
+        3: 0,
+        4: 0,
+    }
+
+    for edf in tqdm(edfs, desc="Processing EDF"):
+
         base = edf.stem
-        xml_file = next((x for x in Path(XML_DIR).glob("*.xml") if base.lower() in x.stem.lower()), None)
+
+        xml_file = next(
+            (
+                x for x in Path(XML_DIR).glob("*.xml")
+                if base.lower() in x.stem.lower()
+            ),
+            None,
+        )
+
         if xml_file is None:
-            print(f"XML missing: {base}")
+            print(f"Missing XML: {base}")
             continue
 
         try:
-            raw = mne.io.read_raw_edf(str(edf), preload=False, verbose=False)
+            raw = mne.io.read_raw_edf(
+                str(edf),
+                preload=True,
+                verbose=False,
+            )
+
         except Exception as e:
-            print(f"Error reading {base}: {e}")
+            print(f"EDF read error {base}: {e}")
             continue
 
-        if raw.info['sfreq'] != TARGET_FS:
-            raw.load_data()
-            raw.resample(TARGET_FS, verbose=False)
+        # =====================================================
+        # INITIAL WAKE CLIPPING
+        # =====================================================
 
-        picks = mne.pick_channels(raw.ch_names, include=CHANNEL_NAMES)
-        if len(picks) < 3:
-            picks = mne.pick_types(raw.info, eeg=True)
-            if len(picks) >= 3:
-                picks = picks[:3]
-            else:
-                # If named differently, just take the first 3 EEG channels found
-                picks = list(range(min(3, len(raw.ch_names))))
+        clip_t0 = 0.0
 
-        data = raw.get_data(picks=picks)
+        first_stage = parse_first_stage_from_xml(xml_file)
+
+        if first_stage is not None:
+
+            start, duration, stage = first_stage
+
+            if "wake" in stage.lower():
+
+                keep_seconds = KEEP_WAKE_EPOCHS * EPOCH_SEC
+
+                if duration > keep_seconds:
+
+                    clip_t0 = start + (duration - keep_seconds)
+
+                    try:
+                        raw.crop(tmin=clip_t0, tmax=None)
+
+                    except Exception as e:
+                        print(f"Crop failed: {e}")
+                        clip_t0 = 0.0
+
+        # =====================================================
+        # CHANNEL PROCESSING
+        # =====================================================
+
+        channels_read = [
+            ch for ch in CHANNEL_NAMES
+            if ch in raw.ch_names
+        ]
+
+        if not channels_read:
+            print(f"No EEG channels: {base}")
+            continue
+
+        channel_dict = {}
+
+        for ch in channels_read:
+
+            ch_raw = raw.copy().pick([ch])
+
+            ch_raw.filter(
+                LOWCUT,
+                HIGHCUT,
+                verbose=False,
+            )
+
+            ch_raw.resample(
+                TARGET_FS,
+                verbose=False,
+            )
+
+            data = ch_raw.get_data()[0]
+
+            std = np.std(data)
+
+            if std > 0:
+                data = (data - np.mean(data)) / std
+
+            channel_dict[ch] = data
+
+        for ch in CHANNEL_NAMES:
+            if ch not in channel_dict:
+                channel_dict[ch] = None
+
+        lengths = [
+            len(v)
+            for v in channel_dict.values()
+            if v is not None
+        ]
+
+        if not lengths:
+            continue
+
+        target_length = min(lengths)
+
+        for ch in channel_dict:
+
+            v = channel_dict[ch]
+
+            if v is None:
+                channel_dict[ch] = np.zeros(target_length)
+
+            elif len(v) > target_length:
+                channel_dict[ch] = v[:target_length]
+
+            elif len(v) < target_length:
+                channel_dict[ch] = np.pad(
+                    v,
+                    (0, target_length - len(v)),
+                )
+
+        data = np.stack([
+            channel_dict[ch]
+            for ch in CHANNEL_NAMES
+        ])
+
+        # =====================================================
+        # LABEL PROCESSING
+        # =====================================================
+
+        annotations = parse_sleep_stages(xml_file)
+
+        annotations = adjust_annotations_for_clip(
+            annotations,
+            clip_t0,
+        )
+
+        epoch_labels = expand_annotations_to_epochs(annotations)
+
+        epoch_labels_nums = [
+            int(item.split('|')[-1])
+            for item in epoch_labels
+        ]
+
+        epoch_labels_nums = remap_labels(epoch_labels_nums)
+
         total_epochs = data.shape[1] // SAMPLES_PER_EPOCH
-        labels = parse_xml(xml_file, total_epochs)
-
-        start_idx = next((i for i, l in enumerate(labels) if l != 0), 0)
 
         saved = 0
-        for epoch in range(start_idx, total_epochs):
-            label = labels[epoch]
+
+        for epoch in range(total_epochs):
+
+            if epoch >= len(epoch_labels_nums):
+                break
+
+            label = epoch_labels_nums[epoch]
+
             if label < 0:
                 continue
 
-            # Skip invalid chunks
             start = epoch * SAMPLES_PER_EPOCH
             stop = start + SAMPLES_PER_EPOCH
+
             segment = data[:, start:stop]
+
             if segment.shape[1] != SAMPLES_PER_EPOCH:
                 continue
 
             tensor = compute_cwt(segment)
+
             h = tensor_hash(tensor)
+
             if h in seen:
                 continue
+
             seen.add(h)
 
             fname = f"s_{sid:06d}.pt"
-            torch.save(tensor.cpu(), os.path.join(CACHE_DIR, fname))
 
-            metadata.append(f"{fname},{label},{base},{epoch},{sid}")
+            torch.save(
+                tensor.cpu(),
+                CACHE_DIR / fname,
+            )
+
+            metadata.append(
+                f"{fname},{label},{base},{epoch},{sid}"
+            )
+
             class_counts[label] += 1
+
             sid += 1
             saved += 1
 
-        print(f"Saved: {saved} epochs for {base}")
+        print(f"Saved {saved} epochs for {base}")
+
         gc.collect()
 
-    print("Shuffling and saving metadata...")
     random.shuffle(metadata)
+
     with open(META_FILE, "w") as f:
+
         f.write("filename,label,subject,global_epoch,sid\n")
+
         f.write("\n".join(metadata) + "\n")
 
-    print("\nFinal class distribution:", class_counts)
+    print("Final class distribution:")
+    print(class_counts)
+
+
+# =========================================================
+# DATASET
+# =========================================================
+
 
 class SleepDataset(Dataset):
+
     def __init__(self, df, augment=False):
         self.df = df.reset_index(drop=True)
         self.augment = augment
@@ -264,81 +531,147 @@ class SleepDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx):
+
         row = self.df.iloc[idx]
-        x = torch.load(CACHE_DIR / row["filename"], map_location="cpu")
+
+        x = torch.load(
+            CACHE_DIR / row["filename"],
+            map_location="cpu",
+        )
+
         y = int(row["label"])
 
         if self.augment and random.random() < 0.5:
+
             shift = random.randint(-8, 8)
             x = torch.roll(x, shifts=shift, dims=2)
+
             noise = torch.randn_like(x) * 0.015
             x = x + noise
 
         return x, y
 
+
+# =========================================================
+# CNN MODEL
+# =========================================================
+
+
 class CNN(nn.Module):
+
     def __init__(self):
         super().__init__()
+
         self.net = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.AdaptiveAvgPool2d((1, 1))
+            nn.Conv2d(3, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.AdaptiveAvgPool2d((1, 1)),
         )
+
         self.fc = nn.Linear(128, 5)
 
     def forward(self, x):
+
         x = self.net(x)
+
         x = x.view(x.size(0), -1)
+
         return self.fc(x)
 
+
+# =========================================================
+# VIT MODEL
+# =========================================================
+
+
 class EnhancedViT(nn.Module):
-    def __init__(self, img_size=96, patch=8, dim=256, depth=8, heads=8):
+
+    def __init__(
+        self,
+        img_size=96,
+        patch=8,
+        dim=256,
+        depth=8,
+        heads=8,
+    ):
         super().__init__()
+
         num_patches = (img_size // patch) ** 2
+
         self.patch_embed = nn.Conv2d(3, dim, patch, patch)
-        self.cls_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
-        self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, dim) * 0.02)
+
+        self.cls_token = nn.Parameter(
+            torch.randn(1, 1, dim) * 0.02
+        )
+
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, num_patches + 1, dim) * 0.02
+        )
 
         encoder_layer = nn.TransformerEncoderLayer(
-            dim, heads, dim_feedforward=512, dropout=0.1,
-            activation="gelu", batch_first=True
+            dim,
+            heads,
+            dim_feedforward=512,
+            dropout=0.1,
+            activation="gelu",
+            batch_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, depth)
+
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            depth,
+        )
+
         self.norm = nn.LayerNorm(dim)
         self.dropout = nn.Dropout(0.1)
         self.head = nn.Linear(dim, 5)
 
     def forward(self, x):
+
         B = x.shape[0]
+
         x = self.patch_embed(x)
+
         x = x.flatten(2).transpose(1, 2)
+
         cls = self.cls_token.expand(B, -1, -1)
+
         x = torch.cat([cls, x], dim=1)
+
         x = x + self.pos_embed[:, :x.size(1)]
+
         x = self.transformer(x)
+
         x = self.norm(x[:, 0])
+
         x = self.dropout(x)
+
         return self.head(x)
 
-# =========================================================
-# MULTITHREAD SETTINGS (COLAB OPTIMIZED)
-# =========================================================
-import multiprocessing
-torch.set_num_threads(multiprocessing.cpu_count())
 
 # =========================================================
-# TRAIN FUNCTION
+# TRAINING
 # =========================================================
-def train_model(model, train_loader, val_loader, class_weights, epochs=EPOCHS, patience=10):
+
+
+def train_model(model, train_loader, val_loader, class_weights):
 
     model.to(DEVICE)
 
-    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=epochs//2
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=3e-4,
+        weight_decay=1e-4,
     )
 
     criterion = nn.CrossEntropyLoss(
@@ -347,83 +680,61 @@ def train_model(model, train_loader, val_loader, class_weights, epochs=EPOCHS, p
 
     best_f1 = -1
     best_state = None
-    patience_counter = 0
 
-    for epoch in range(epochs):
+    for epoch in range(EPOCHS):
 
         model.train()
+
         total_loss = 0
 
-        for x,y in train_loader:
+        for x, y in train_loader:
 
-            x = x.to(DEVICE, non_blocking=True)
-            y = y.to(DEVICE, non_blocking=True)
+            x = x.to(DEVICE)
+            y = y.to(DEVICE)
 
             optimizer.zero_grad()
 
             out = model(x)
 
-            loss = criterion(out,y)
+            loss = criterion(out, y)
 
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(),1)
-
             optimizer.step()
 
-            total_loss += loss.item()*x.size(0)
-
-        train_loss = total_loss/len(train_loader.dataset)
+            total_loss += loss.item() * x.size(0)
 
         model.eval()
 
-        preds=[]
-        trues=[]
-        val_loss=0
+        preds = []
+        trues = []
 
         with torch.no_grad():
 
-            for x,y in val_loader:
+            for x, y in val_loader:
 
-                x = x.to(DEVICE, non_blocking=True)
-                y = y.to(DEVICE, non_blocking=True)
+                x = x.to(DEVICE)
 
                 out = model(x)
-
-                loss = criterion(out,y)
-
-                val_loss += loss.item()*x.size(0)
 
                 p = out.argmax(1).cpu().numpy()
 
                 preds.extend(p)
-                trues.extend(y.cpu().numpy())
+                trues.extend(y.numpy())
 
-        val_loss = val_loss/len(val_loader.dataset)
-
-        macro_f1 = f1_score(trues,preds,average="macro")
-
-        print(
-            f"Epoch {epoch+1} | Train Loss {train_loss:.4f} | Val Loss {val_loss:.4f} | Val F1 {macro_f1:.4f}"
+        macro_f1 = f1_score(
+            trues,
+            preds,
+            average="macro",
         )
 
-        scheduler.step()
+        print(
+            f"Epoch {epoch+1} | F1 {macro_f1:.4f}"
+        )
 
-        if macro_f1>best_f1:
-
+        if macro_f1 > best_f1:
             best_f1 = macro_f1
             best_state = model.state_dict()
-
-            patience_counter = 0
-
-        else:
-
-            patience_counter+=1
-
-        if patience_counter>=patience:
-
-            print("Early stopping triggered")
-            break
 
     model.load_state_dict(best_state)
 
@@ -431,238 +742,77 @@ def train_model(model, train_loader, val_loader, class_weights, epochs=EPOCHS, p
 
 
 # =========================================================
-# EVALUATION FUNCTION
+# EVALUATION
 # =========================================================
+
+
 def evaluate(model, loader, name):
+
     model.eval()
+
     preds = []
     trues = []
 
     with torch.no_grad():
+
         for x, y in loader:
+
             x = x.to(DEVICE)
+
             out = model(x)
+
             p = out.argmax(1).cpu().numpy()
+
             preds.extend(p)
             trues.extend(y.numpy())
 
-    classes = ["Wake", "N1", "N2", "N3", "REM"]
+    acc = accuracy_score(trues, preds)
+
+    f1 = f1_score(
+        trues,
+        preds,
+        average="macro",
+    )
+
     cm = confusion_matrix(trues, preds)
 
-    # 1. PRINT TEXT MATRIX TO TERMINAL
-    cm_df = pd.DataFrame(
-        cm, 
-        index=[f"Actual_{c:4}" for c in classes], 
-        columns=[f"Pred_{c:4}" for c in classes]
-    )
-    
-    print(f"\n" + "="*50)
-    print(f" RAW CONFUSION MATRIX: {name}")
-    print("="*50)
-    print(cm_df)
-    print("="*50)
+    print(f"\n{name}")
 
-    # 2. PRINT CLASSIFICATION REPORT
-    print(f"\n{name} Detailed Metrics:")
-    print(classification_report(trues, preds, target_names=classes, digits=3, zero_division=0))
+    print(classification_report(
+        trues,
+        preds,
+        digits=3,
+    ))
 
-    # 3. GENERATE VISUAL HEATMAP (Optional - keeps it in Colab output)
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes, yticklabels=classes)
-    plt.title(f"{name} Visual Confusion Matrix")
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.show() 
-
-    acc = accuracy_score(trues, preds)
-    f1 = f1_score(trues, preds, average="macro")
     return acc, f1, cm
-
-# =========================================================
-# RESULT PLOTTING
-# =========================================================
-def plot_results(results):
-
-    models=list(results.keys())
-
-    acc=[results[m]["accuracy"] for m in models]
-
-    f1=[results[m]["f1"] for m in models]
-
-    # Accuracy chart
-    plt.figure()
-
-    sns.barplot(x=models,y=acc)
-
-    plt.title("Model Accuracy Comparison")
-
-    plt.ylabel("Accuracy")
-
-    plt.show()
-
-    # F1 chart
-    plt.figure()
-
-    sns.barplot(x=models,y=f1)
-
-    plt.title("Model Macro F1 Comparison")
-
-    plt.ylabel("Macro F1")
-
-    plt.show()
-
-    # Confusion matrices
-
-    classes=["Wake","N1","N2","N3","REM"]
-
-    for model in models:
-
-        plt.figure(figsize=(6,5))
-
-        sns.heatmap(
-            results[model]["cm"],
-            annot=True,
-            fmt="d",
-            xticklabels=classes,
-            yticklabels=classes,
-            cmap="Blues"
-        )
-
-        plt.title(f"{model} Confusion Matrix")
-
-        plt.ylabel("True")
-
-        plt.xlabel("Predicted")
-
-        plt.show()
 
 
 # =========================================================
 # TRAIN PIPELINE
 # =========================================================
+
+
 def train_pipeline():
+
     if not os.path.exists(META_FILE):
-        print("Starting preprocessing")
         preprocess()
-
-    df=pd.read_csv(META_FILE)
-
-    print("Dataset distribution")
-
-    print(df["label"].value_counts().sort_index())
-
-    label_counts=df["label"].value_counts().sort_index().reindex([0,1,2,3,4],fill_value=1)
-
-    weights=1/label_counts
-
-    weights=weights/weights.mean()
-
-    class_weights=torch.tensor(weights.values,dtype=torch.float32)
-
-    df=shuffle(df,random_state=42)
-
-    train_val,test=train_test_split(
-        df,
-        test_size=0.2,
-        stratify=df["label"],
-        random_state=42
-    )
-
-    train,val=train_test_split(
-        train_val,
-        test_size=0.125,
-        stratify=train_val["label"],
-        random_state=42
-    )
-
-    train_loader=DataLoader(
-        SleepDataset(train,augment=True),
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        persistent_workers=True
-    )
-
-    val_loader=DataLoader(
-        SleepDataset(val),
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        persistent_workers=True
-    )
-
-    test_loader=DataLoader(
-        SleepDataset(test),
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        persistent_workers=True
-    )
-
-    print(f"\nTrain {len(train)} | Val {len(val)} | Test {len(test)}")
-
-    results={}
-
-    # =====================================================
-    # TRAIN VIT FIRST
-    # =====================================================
-
-    print("\nTraining ViT")
-
-    vit=EnhancedViT()
-
-    vit=train_model(vit,train_loader,val_loader,class_weights)
-
-    acc,f1,cm=evaluate(vit,test_loader,"ViT")
-
-    torch.save(vit.state_dict(),OUTPUT_DIR/"model_vit.pth")
-
-    results["ViT"]={
-        "accuracy":acc,
-        "f1":f1,
-        "cm":cm
-    }
-
-    # =====================================================
-    # TRAIN CNN SECOND
-    # =====================================================
-
-    print("\nTraining CNN")
-
-    cnn=CNN()
-
-    cnn=train_model(cnn,train_loader,val_loader,class_weights)
-
-    acc,f1,cm=evaluate(cnn,test_loader,"CNN")
-
-    torch.save(cnn.state_dict(),OUTPUT_DIR/"model_cnn.pth")
-
-    results["CNN"]={
-        "accuracy":acc,
-        "f1":f1,
-        "cm":cm
-    }
-
-    # =====================================================
-    # PLOT RESULTS
-    # =====================================================
-
-    plot_results(results)
-
-
-def get_data_loaders():
 
     df = pd.read_csv(META_FILE)
 
-    label_counts = df["label"].value_counts().sort_index().reindex([0,1,2,3,4],fill_value=1)
+    label_counts = (
+        df["label"]
+        .value_counts()
+        .sort_index()
+        .reindex([0,1,2,3,4], fill_value=1)
+    )
 
     weights = 1 / label_counts
     weights = weights / weights.mean()
 
-    class_weights = torch.tensor(weights.values, dtype=torch.float32)
+    class_weights = torch.tensor(
+        weights.values,
+        dtype=torch.float32,
+    )
 
     df = shuffle(df, random_state=42)
 
@@ -670,14 +820,14 @@ def get_data_loaders():
         df,
         test_size=0.2,
         stratify=df["label"],
-        random_state=42
+        random_state=42,
     )
 
     train, val = train_test_split(
         train_val,
         test_size=0.125,
         stratify=train_val["label"],
-        random_state=42
+        random_state=42,
     )
 
     train_loader = DataLoader(
@@ -685,7 +835,13 @@ def get_data_loaders():
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=NUM_WORKERS,
-        pin_memory=True
+    )
+
+    val_loader = DataLoader(
+        SleepDataset(val),
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
     )
 
     test_loader = DataLoader(
@@ -693,126 +849,58 @@ def get_data_loaders():
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=NUM_WORKERS,
-        pin_memory=True
     )
 
-    return train_loader, test_loader, class_weights
-# CNN and Vit training code is in train_models.py END
+    print("Training ViT")
+
+    vit = EnhancedViT()
+
+    vit = train_model(
+        vit,
+        train_loader,
+        val_loader,
+        class_weights,
+    )
+
+    acc, f1, cm = evaluate(vit, test_loader, "ViT")
+
+    torch.save(
+        vit.state_dict(),
+        OUTPUT_DIR / "model_vit.pth",
+    )
+
+    print("Training CNN")
+
+    cnn = CNN()
+
+    cnn = train_model(
+        cnn,
+        train_loader,
+        val_loader,
+        class_weights,
+    )
+
+    acc, f1, cm = evaluate(cnn, test_loader, "CNN")
+
+    torch.save(
+        cnn.state_dict(),
+        OUTPUT_DIR / "model_cnn.pth",
+    )
 
 
-#============================END (CNN AND VIT TRAINING)============================
-
-
-# =====================Start Distillation ============================
-
-
-def train_distillation(train_loader, test_loader, class_weights):
-
-    print("\n=================================")
-    print("Step 1: Load Teacher and Student")
-    print("=================================")
-
-    teacher = EnhancedViT().to(DEVICE)
-    teacher.load_state_dict(torch.load(OUTPUT_DIR / "model_vit.pth"))
-    teacher.eval()
-
-    print("Teacher Model: ViT (Pretrained Loaded)")
-
-    student = CNN().to(DEVICE)
-
-    # Optional: start from pretrained CNN
-    try:
-        student.load_state_dict(torch.load(OUTPUT_DIR / "model_cnn.pth"))
-        print("Student Model: CNN (Pretrained Loaded)")
-    except:
-        print("Student Model: CNN (Random Init)")
-
-    for p in teacher.parameters():
-        p.requires_grad = False
-
-    optimizer = optim.AdamW(student.parameters(), lr=3e-4)
-
-    ce_loss = nn.CrossEntropyLoss(weight=class_weights.to(DEVICE))
-    kl_loss = nn.KLDivLoss(reduction="batchmean")
-
-    print("\nStep 2: Distillation Loss = KL Divergence")
-    print("Step 3: Student vs Ground Truth")
-    print("Step 4: Cross Entropy Loss")
-    print("Step 5: Total Loss = α CE + (1-α) KL")
-    print("Step 6: Backpropagate to CNN")
-
-    for epoch in range(EPOCHS):
-
-        student.train()
-
-        total_loss = 0
-        total_ce = 0
-        total_kd = 0
-
-        for x,y in train_loader:
-
-            x = x.to(DEVICE)
-            y = y.to(DEVICE)
-
-            optimizer.zero_grad()
-
-            # Teacher prediction
-            with torch.no_grad():
-                teacher_logits = teacher(x)
-
-            # Student prediction
-            student_logits = student(x)
-
-            # Cross entropy loss
-            loss_ce = ce_loss(student_logits, y)
-
-            # Distillation loss
-            loss_kd = kl_loss(
-                F.log_softmax(student_logits / T, dim=1),
-                F.softmax(teacher_logits / T, dim=1)
-            ) * (T*T)
-
-            # Total loss
-            loss = ALPHA * loss_ce + (1 - ALPHA) * loss_kd
-
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            total_ce += loss_ce.item()
-            total_kd += loss_kd.item()
-
-        print(
-            f"Epoch {epoch+1}/{EPOCHS} | "
-            f"CE Loss: {total_ce/len(train_loader):.4f} | "
-            f"KD Loss: {total_kd/len(train_loader):.4f} | "
-            f"Total Loss: {total_loss/len(train_loader):.4f}"
-        )
-
-    print("\nStep 7: Final Sleep Stage Classification Evaluation")
-
-    acc, f1, cm = evaluate(student, test_loader, "Distilled CNN")
-
-    torch.save(student.state_dict(), OUTPUT_DIR / "model_cnn_distilled.pth")
-
-    print("\nDistilled CNN saved to:")
-    print(OUTPUT_DIR / "model_cnn_distilled.pth")
-
-    print("\nFinal Results")
-    print("Accuracy:", acc)
-    print("Macro F1:", f1)
-
-    return student
-# =====================End Distillation ============================
-
+# =========================================================
+# MAIN
+# =========================================================
 
 
 def main():
-        print("Running training models (vit and cnn)")
-        train_pipeline()
-        print("Running knowledge distillation")
-        train_loader, test_loader, class_weights = get_data_loaders()
-        train_distillation(train_loader, test_loader, class_weights)
+
+    print("Torch Version:", torch.__version__)
+    print("CUDA Available:", torch.cuda.is_available())
+    print("Device:", DEVICE)
+
+    train_pipeline()
+
 
 if __name__ == "__main__":
     main()
