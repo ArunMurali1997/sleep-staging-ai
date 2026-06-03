@@ -54,20 +54,23 @@ BASE_DIR = Path("/content/sleep_model")
 EDF_DIR = BASE_DIR / "Data" / "edf"
 XML_DIR = BASE_DIR / "Data" / "annot"
 OUTPUT_DIR = BASE_DIR / "output"
-META_FILE = OUTPUT_DIR / "metadata.csv"
-
 PREPROCESSED_DIR = OUTPUT_DIR / "cwt_cache"
 
 
 
-PREPROCESSED_DIR.mkdir(
-    parents=True,
-    exist_ok=True,
-)
+# PREPROCESSED_DIR.mkdir(
+#     parents=True,
+#     exist_ok=True,
+# )
 
 OUTPUT_DIR.mkdir(
     parents=True,
     exist_ok=True,
+)
+
+EXPORT_DIR = (
+    BASE_DIR /
+    "share_package"
 )
 
 DEVICE = torch.device(
@@ -77,8 +80,8 @@ DEVICE = torch.device(
 print("Torch:", torch.__version__)
 print("CUDA:", torch.cuda.is_available())
 print("Device:", DEVICE)
-print("PREPROCESSED_DIR:", PREPROCESSED_DIR)
-print("PT FILES:", len(list(PREPROCESSED_DIR.glob("*.pt"))))
+# print("PREPROCESSED_DIR:", PREPROCESSED_DIR)
+# print("PT FILES:", len(list(PREPROCESSED_DIR.glob("*.pt"))))
 
 if DEVICE.type == "cuda":
     print("GPU:", torch.cuda.get_device_name(0))
@@ -144,26 +147,50 @@ if torch.cuda.is_available():
 
 class SleepDataset(Dataset):
 
-    def __init__(self, df, augment=False):
-
-        self.df = df.reset_index(drop=True)
+    def __init__(self, file_list, augment=False):
 
         self.augment = augment
 
-    def __len__(self):
+        self.index_map = []
 
-        return len(self.df)
+        self.cache = {}
+
+        print("Loading dataset...")
+
+        for file_path in file_list:
+
+            data = torch.load(
+                file_path,
+                map_location="cpu"
+            )
+
+            self.cache[file_path] = data
+
+            for i in range(
+                len(data["labels"])
+            ):
+                self.index_map.append(
+                    (file_path, i)
+                )
+
+        print(
+            f"Total epochs: {len(self.index_map)}"
+        )
+
+    def __len__(self):
+        return len(self.index_map)
 
     def __getitem__(self, idx):
 
-        row = self.df.iloc[idx]
+        file_path, ep_idx = self.index_map[idx]
 
-        x = torch.load(
-            PREPROCESSED_DIR / row["filename"],
-            map_location="cpu",
+        data = self.cache[file_path]
+
+        x = data["eeg_cwt"][ep_idx].float()
+
+        y = int(
+            data["labels"][ep_idx]
         )
-
-        y = int(row["label"])
 
         if self.augment and random.random() < 0.5:
 
@@ -172,18 +199,15 @@ class SleepDataset(Dataset):
             x = torch.roll(
                 x,
                 shifts=shift,
-                dims=2,
+                dims=2
             )
 
-            noise = (
+            x = x + (
                 torch.randn_like(x)
                 * 0.015
             )
 
-            x = x + noise
-
-        return x.float(), y
-
+        return x, y
 # =========================================================
 # CNN
 # =========================================================
@@ -417,76 +441,52 @@ def evaluate(
 
 def get_data_loaders():
 
-    if not META_FILE.exists():
-
-        raise FileNotFoundError(
-            f"Metadata file not found: {META_FILE}"
-        )
-
-    df = pd.read_csv(META_FILE)
-
-    print(f"Loaded {len(df)} samples")
-
-    train_val, test = train_test_split(
-        df,
-        test_size=0.2,
-        stratify=df["label"],
-        random_state=42,
+    pt_files = sorted(
+        EXPORT_DIR.glob("*.pt")
     )
 
-    train, _ = train_test_split(
-        train_val,
-        test_size=0.125,
-        stratify=train_val["label"],
-        random_state=42,
+    print(
+        f"Found {len(pt_files)} files"
+    )
+
+    train_files, test_files = train_test_split(
+        pt_files,
+        test_size=0.2,
+        random_state=42
     )
 
     train_dataset = SleepDataset(
-        train,
-        augment=True,
+        train_files,
+        augment=True
     )
 
     test_dataset = SleepDataset(
-        test,
+        test_files
     )
 
-    labels = train["label"].values
-
-    class_counts = np.bincount(
-        labels,
-        minlength=NUM_CLASSES,
-    )
-
-    weights = 1 / np.maximum(
-        class_counts,
-        1,
-    )
-
-    weights = weights / weights.mean()
-
-    class_weights = torch.tensor(
-        weights,
-        dtype=torch.float32,
+    class_weights = torch.ones(
+        NUM_CLASSES,
+        dtype=torch.float32
     )
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=NUM_WORKERS,
+        num_workers=NUM_WORKERS
     )
 
     test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=NUM_WORKERS,
+        num_workers=NUM_WORKERS
     )
 
     return (
         train_loader,
         test_loader,
-        class_weights,
+        class_weights
     )
 # =========================================================
 # DISTILLATION
@@ -614,7 +614,7 @@ def train_distillation(
 
     torch.save(
         student.state_dict(),
-        OUTPUT_DIR / "model_cnn_distilled.pth"
+        OUTPUT_DIR / "model_cnn_distilled.pth"  
     )
 
     print(
