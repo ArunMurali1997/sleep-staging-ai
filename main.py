@@ -39,23 +39,26 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from ssqueezepy import cwt as ssq_cwt
-from train_models import (
-    train_pipeline,
-)
+# from train_models import (
+#     train_pipeline,
+# )
 
 
 # =========================================================
 # CONFIG
 # =========================================================
 
+
 BASE_DIR = Path("/content/sleep_model")
 
 EDF_DIR = BASE_DIR / "Data" / "edf"
 XML_DIR = BASE_DIR / "Data" / "annot"
-
-PREPROCESSED_DIR = BASE_DIR / "preprocessed"
-
 OUTPUT_DIR = BASE_DIR / "output"
+META_FILE = OUTPUT_DIR / "metadata.csv"
+
+PREPROCESSED_DIR = OUTPUT_DIR / "cwt_cache"
+
+
 
 PREPROCESSED_DIR.mkdir(
     parents=True,
@@ -74,6 +77,8 @@ DEVICE = torch.device(
 print("Torch:", torch.__version__)
 print("CUDA:", torch.cuda.is_available())
 print("Device:", DEVICE)
+print("PREPROCESSED_DIR:", PREPROCESSED_DIR)
+print("PT FILES:", len(list(PREPROCESSED_DIR.glob("*.pt"))))
 
 if DEVICE.type == "cuda":
     print("GPU:", torch.cuda.get_device_name(0))
@@ -140,41 +145,26 @@ if torch.cuda.is_available():
 
 class SleepDataset(Dataset):
 
-    def __init__(
-        self,
-        pt_files,
-        augment=False,
-    ):
+    def __init__(self, df, augment=False):
 
-        self.samples = []
+        self.df = df.reset_index(drop=True)
 
         self.augment = augment
 
-        for pt_file in pt_files:
-
-            data = torch.load(
-                pt_file,
-                map_location="cpu",
-            )
-
-            eeg_cwt = data["eeg_cwt"]
-
-            labels = data["labels"]
-
-            for i in range(len(labels)):
-
-                self.samples.append((
-                    eeg_cwt[i].float(),
-                    int(labels[i]),
-                ))
-
     def __len__(self):
 
-        return len(self.samples)
+        return len(self.df)
 
     def __getitem__(self, idx):
 
-        x, y = self.samples[idx]
+        row = self.df.iloc[idx]
+
+        x = torch.load(
+            PREPROCESSED_DIR / row["filename"],
+            map_location="cpu",
+        )
+
+        y = int(row["label"])
 
         if self.augment and random.random() < 0.5:
 
@@ -193,8 +183,7 @@ class SleepDataset(Dataset):
 
             x = x + noise
 
-        return x, y
-
+        return x.float(), y
 
 # =========================================================
 # CNN
@@ -263,75 +252,32 @@ class CNN(nn.Module):
 # =========================================================
 
 class EnhancedViT(nn.Module):
-
-    def __init__(
-        self,
-        dim=256,
-        depth=8,
-        heads=8,
-    ):
-
+    def __init__(self, img_size=96, patch=8, dim=256, depth=8, heads=8):
         super().__init__()
+        num_patches = (img_size // patch) ** 2
+        self.patch_embed = nn.Conv2d(3, dim, patch, patch)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
+        self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, dim) * 0.02)
 
-        self.patch_embed = nn.Conv2d(
-            3,
-            dim,
-            kernel_size=16,
-            stride=16,
+        encoder_layer = nn.TransformerEncoderLayer(
+            dim, heads, dim_feedforward=512, dropout=0.1,
+            activation="gelu", batch_first=True
         )
-
-        self.cls_token = nn.Parameter(
-            torch.randn(1,1,dim)
-        )
-
-        self.pos_embed = nn.Parameter(
-            torch.randn(1,200,dim)
-        )
-
-        encoder_layer = (
-            nn.TransformerEncoderLayer(
-                d_model=dim,
-                nhead=heads,
-                batch_first=True,
-            )
-        )
-
-        self.transformer = (
-            nn.TransformerEncoder(
-                encoder_layer,
-                num_layers=depth,
-            )
-        )
-
+        self.transformer = nn.TransformerEncoder(encoder_layer, depth)
         self.norm = nn.LayerNorm(dim)
-
-        self.head = nn.Linear(
-            dim,
-            NUM_CLASSES,
-        )
+        self.dropout = nn.Dropout(0.1)
+        self.head = nn.Linear(dim, 5)
 
     def forward(self, x):
-
         B = x.shape[0]
-
         x = self.patch_embed(x)
-
-        x = x.flatten(2).transpose(1,2)
-
-        cls = self.cls_token.expand(
-            B,
-            -1,
-            -1,
-        )
-
+        x = x.flatten(2).transpose(1, 2)
+        cls = self.cls_token.expand(B, -1, -1)
         x = torch.cat([cls, x], dim=1)
-
         x = x + self.pos_embed[:, :x.size(1)]
-
         x = self.transformer(x)
-
-        x = self.norm(x[:,0])
-
+        x = self.norm(x[:, 0])
+        x = self.dropout(x)
         return self.head(x)
 
 
@@ -491,42 +437,40 @@ def evaluate(
 
 def get_data_loaders():
 
-    pt_files = sorted(
-        PREPROCESSED_DIR.glob("*.pt")
-    )
+    if not META_FILE.exists():
 
-    train_files, test_files = train_test_split(
-        pt_files,
+        raise FileNotFoundError(
+            f"Metadata file not found: {META_FILE}"
+        )
+
+    df = pd.read_csv(META_FILE)
+
+    print(f"Loaded {len(df)} samples")
+
+    train_val, test = train_test_split(
+        df,
         test_size=0.2,
+        stratify=df["label"],
         random_state=42,
     )
 
-    train_files, val_files = train_test_split(
-        train_files,
+    train, _ = train_test_split(
+        train_val,
         test_size=0.125,
+        stratify=train_val["label"],
         random_state=42,
     )
 
     train_dataset = SleepDataset(
-        train_files,
+        train,
         augment=True,
     )
 
-    # val_dataset = SleepDataset(
-    #     val_files,
-    # )
-
     test_dataset = SleepDataset(
-        test_files,
+        test,
     )
 
-    labels = []
-
-    for _, y in train_dataset.samples:
-
-        labels.append(y)
-
-    labels = np.array(labels)
+    labels = train["label"].values
 
     class_counts = np.bincount(
         labels,
@@ -552,13 +496,6 @@ def get_data_loaders():
         num_workers=NUM_WORKERS,
     )
 
-    # val_loader = DataLoader(
-    #     val_dataset,
-    #     batch_size=BATCH_SIZE,
-    #     shuffle=False,
-    #     num_workers=NUM_WORKERS,
-    # )
-
     test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,
@@ -571,8 +508,6 @@ def get_data_loaders():
         test_loader,
         class_weights,
     )
-
-
 # =========================================================
 # DISTILLATION
 # =========================================================
@@ -586,12 +521,11 @@ def train_distillation(
 
     teacher = EnhancedViT().to(DEVICE)
 
+    print("Loading teacher...")
     teacher.load_state_dict(
-        torch.load(
-            vit_pth_path,
-            map_location=DEVICE,
-        )
+        torch.load(vit_pth_path, map_location=DEVICE)
     )
+    print("Teacher loaded successfully")
 
     teacher.eval()
 
@@ -700,7 +634,7 @@ def train_pipeline_distillation():
 
 def main():
     # Train ViT teacher
-    train_pipeline()
+    # train_pipeline()
     train_pipeline_distillation()
 
 
