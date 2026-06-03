@@ -120,9 +120,8 @@ EPOCHS = 30
 
 NUM_CLASSES = 5
 
+ALPHA = 0.7
 T = 4
-ALPHA = 0.5
-
 
 # =========================================================
 # RANDOM SEED
@@ -195,57 +194,38 @@ class CNN(nn.Module):
 
         super().__init__()
 
-        self.net = nn.Sequential(
+        self.features = nn.Sequential(
 
-            nn.Conv2d(
-                3,
-                32,
-                3,
-                padding=1,
-            ),
-
+            nn.Conv2d(3, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-
             nn.MaxPool2d(2),
 
-            nn.Conv2d(
-                32,
-                64,
-                3,
-                padding=1,
-            ),
-
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-
             nn.MaxPool2d(2),
 
-            nn.Conv2d(
-                64,
-                128,
-                3,
-                padding=1,
-            ),
-
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
-
             nn.MaxPool2d(2),
 
             nn.AdaptiveAvgPool2d((1,1))
         )
 
-        self.fc = nn.Linear(
-            128,
-            NUM_CLASSES,
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(128, NUM_CLASSES)
         )
 
-    def forward(self, x):
+    def forward(self,x):
 
-        x = self.net(x)
+        x = self.features(x)
 
-        x = x.view(x.size(0), -1)
+        x = x.view(x.size(0),-1)
 
-        return self.fc(x)
-
+        return self.classifier(x)
 
 # =========================================================
 # VIT
@@ -526,14 +506,25 @@ def train_distillation(
         torch.load(vit_pth_path, map_location=DEVICE)
     )
     print("Teacher loaded successfully")
+    
 
     teacher.eval()
+
+    for param in teacher.parameters():
+        param.requires_grad = False
 
     student = CNN().to(DEVICE)
 
     optimizer = optim.AdamW(
         student.parameters(),
         lr=3e-4,
+    )
+
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        patience=3,
+        factor=0.5
     )
 
     ce_loss = nn.CrossEntropyLoss(
@@ -543,6 +534,8 @@ def train_distillation(
     kl_loss = nn.KLDivLoss(
         reduction="batchmean"
     )
+    best_f1 = -1
+    best_state = None
 
     for epoch in range(EPOCHS):
 
@@ -588,19 +581,44 @@ def train_distillation(
 
             optimizer.step()
 
-        print(
-            f"Distillation Epoch {epoch+1}"
+        acc, f1 = evaluate(
+            student,
+            test_loader,
+            f"Epoch {epoch+1}"
         )
 
-    evaluate(
+        scheduler.step(f1)
+
+        if f1 > best_f1:
+
+            best_f1 = f1
+
+            best_state = {
+                k: v.cpu().clone()
+                for k, v in student.state_dict().items()
+            }
+
+            print(
+                f"New Best F1: {best_f1:.4f}"
+            )
+
+
+
+    student.load_state_dict(best_state)
+
+    acc, f1 = evaluate(
         student,
         test_loader,
-        "Distilled CNN",
+        "Best Distilled CNN"
     )
 
     torch.save(
         student.state_dict(),
-        OUTPUT_DIR / "model_cnn_distilled.pth",
+        OUTPUT_DIR / "model_cnn_distilled.pth"
+    )
+
+    print(
+        f"Best Distilled CNN saved with F1={best_f1:.4f}"
     )
 
 
