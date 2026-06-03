@@ -676,3 +676,12 @@ def get_data_loaders():
     )
 
     return train_loader, test_loader, class_weights
+
+def main():
+    # Train ViT teacher
+    train_pipeline()
+    # train_pipeline_distillation()
+
+
+if __name__ == "__main__":
+    main()
