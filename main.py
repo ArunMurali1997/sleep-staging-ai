@@ -541,6 +541,11 @@ def train_distillation(
 
         student.train()
 
+        total_loss = 0
+        total_ce = 0
+        total_kd = 0
+        total_samples = 0
+
         for x, y in train_loader:
 
             x = x.to(DEVICE)
@@ -576,10 +581,25 @@ def train_distillation(
                 +
                 (1 - ALPHA) * loss_kd
             )
+            batch_size = x.size(0)
+
+            total_loss += loss.item() * batch_size
+            total_ce += loss_ce.item() * batch_size
+            total_kd += loss_kd.item() * batch_size
+            total_samples += batch_size
 
             loss.backward()
 
+            torch.nn.utils.clip_grad_norm_(
+                student.parameters(),
+                1.0
+            )
+
             optimizer.step()
+
+            avg_loss = total_loss / total_samples
+            avg_ce = total_ce / total_samples
+            avg_kd = total_kd / total_samples
 
         acc, f1 = evaluate(
             student,
@@ -587,7 +607,15 @@ def train_distillation(
             f"Epoch {epoch+1}"
         )
 
+
         scheduler.step(f1)
+        print(
+            f"Epoch {epoch+1} "
+            f"| Loss {avg_loss:.4f} "
+            f"| CE {avg_ce:.4f} "
+            f"| KD {avg_kd:.4f} "
+            f"| F1 {f1:.4f}"
+        )
 
         if f1 > best_f1:
 
@@ -597,10 +625,11 @@ def train_distillation(
                 k: v.cpu().clone()
                 for k, v in student.state_dict().items()
             }
-
             print(
                 f"New Best F1: {best_f1:.4f}"
             )
+
+
 
 
 
