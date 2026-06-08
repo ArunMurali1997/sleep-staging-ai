@@ -13,7 +13,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, f1_score
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, cohen_kappa_score
 from sklearn.utils import shuffle
 import mne
 import pywt
@@ -21,6 +21,8 @@ from scipy.signal import butter, filtfilt
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score
+from thop import profile
+from thop import clever_format
 
 print(f"Torch Version: {torch.__version__}")
 print(f"CUDA Available: {torch.cuda.is_available()}")
@@ -234,6 +236,31 @@ def preprocess():
 
     print("\nFinal class distribution:", class_counts)
 
+def print_model_stats(model, name):
+
+    model.eval()
+
+    dummy_input = torch.randn(
+        1, 3, 96, 96
+    ).to(DEVICE)
+
+    flops, params = profile(
+        model,
+        inputs=(dummy_input,),
+        verbose=False
+    )
+
+    flops, params = clever_format(
+        [flops, params],
+        "%.3f"
+    )
+
+    print("\n" + "=" * 50)
+    print(f"{name} Model Statistics")
+    print("=" * 50)
+    print(f"Parameters: {params}")
+    print(f"FLOPs: {flops}")
+    print("=" * 50)
 class SleepDataset(Dataset):
     def __init__(self, df, augment=False):
         self.df = df.reset_index(drop=True)
@@ -413,50 +440,185 @@ def train_model(model, train_loader, val_loader, class_weights, epochs=EPOCHS, p
 # EVALUATION FUNCTION
 # =========================================================
 def evaluate(model, loader, name):
+
     model.eval()
+
     preds = []
     trues = []
 
     with torch.no_grad():
+
         for x, y in loader:
+
             x = x.to(DEVICE)
+
             out = model(x)
+
             p = out.argmax(1).cpu().numpy()
+
             preds.extend(p)
+
             trues.extend(y.numpy())
 
-    classes = ["Wake", "N1", "N2", "N3", "REM"]
-    cm = confusion_matrix(trues, preds)
+    classes = [
+        "Wake",
+        "N1",
+        "N2",
+        "N3",
+        "REM"
+    ]
 
-    # 1. PRINT TEXT MATRIX TO TERMINAL
-    cm_df = pd.DataFrame(
-        cm, 
-        index=[f"Actual_{c:4}" for c in classes], 
-        columns=[f"Pred_{c:4}" for c in classes]
+    # ==========================================
+    # METRICS
+    # ==========================================
+
+    accuracy = accuracy_score(
+        trues,
+        preds
     )
-    
-    print(f"\n" + "="*50)
-    print(f" RAW CONFUSION MATRIX: {name}")
-    print("="*50)
+
+    macro_f1 = f1_score(
+        trues,
+        preds,
+        average="macro"
+    )
+
+    kappa = cohen_kappa_score(
+        trues,
+        preds
+    )
+
+    cm = confusion_matrix(
+        trues,
+        preds
+    )
+
+    report = classification_report(
+        trues,
+        preds,
+        target_names=classes,
+        output_dict=True,
+        zero_division=0
+    )
+
+    # ==========================================
+    # PRINT EVERYTHING TO TERMINAL
+    # ==========================================
+
+    print("\n" + "=" * 70)
+    print(f"{name} FINAL RESULTS")
+    print("=" * 70)
+
+    print(
+        f"Accuracy     : {accuracy:.4f}"
+    )
+
+    print(
+        f"Cohen Kappa  : {kappa:.4f}"
+    )
+
+    print(
+        f"Macro F1     : {macro_f1:.4f}"
+    )
+
+    # ==========================================
+    # STAGE-WISE METRICS
+    # ==========================================
+
+    print("\n" + "=" * 70)
+    print("STAGE-WISE METRICS")
+    print("=" * 70)
+
+    for cls in classes:
+
+        precision = report[
+            cls
+        ]["precision"]
+
+        recall = report[
+            cls
+        ]["recall"]
+
+        f1 = report[
+            cls
+        ]["f1-score"]
+
+        print(
+            f"{cls:5} | "
+            f"Precision: {precision:.4f} | "
+            f"Recall: {recall:.4f} | "
+            f"F1 Score: {f1:.4f}"
+        )
+
+    # ==========================================
+    # CLASSIFICATION REPORT
+    # ==========================================
+
+    print("\n" + "=" * 70)
+    print("FULL CLASSIFICATION REPORT")
+    print("=" * 70)
+
+    print(
+        classification_report(
+            trues,
+            preds,
+            target_names=classes,
+            digits=4,
+            zero_division=0
+        )
+    )
+
+    # ==========================================
+    # CONFUSION MATRIX TABLE
+    # ==========================================
+
+    cm_df = pd.DataFrame(
+        cm,
+        index=[
+            f"Actual_{c}"
+            for c in classes
+        ],
+        columns=[
+            f"Pred_{c}"
+            for c in classes
+        ]
+    )
+
+    print("\n" + "=" * 70)
+    print("CONFUSION MATRIX")
+    print("=" * 70)
+
     print(cm_df)
-    print("="*50)
 
-    # 2. PRINT CLASSIFICATION REPORT
-    print(f"\n{name} Detailed Metrics:")
-    print(classification_report(trues, preds, target_names=classes, digits=3, zero_division=0))
+    # ==========================================
+    # VISUAL CONFUSION MATRIX
+    # ==========================================
 
-    # 3. GENERATE VISUAL HEATMAP (Optional - keeps it in Colab output)
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes, yticklabels=classes)
-    plt.title(f"{name} Visual Confusion Matrix")
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.show() 
+    plt.figure(figsize=(7, 6))
 
-    acc = accuracy_score(trues, preds)
-    f1 = f1_score(trues, preds, average="macro")
-    return acc, f1, cm
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=classes,
+        yticklabels=classes
+    )
 
+    plt.title(
+        f"{name} Confusion Matrix"
+    )
+
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
+
+    plt.show()
+
+    return (
+        accuracy,
+        macro_f1,
+        cm
+    )
 # =========================================================
 # RESULT PLOTTING
 # =========================================================
@@ -592,6 +754,10 @@ def train_pipeline():
     print("\nTraining ViT")
 
     vit=EnhancedViT()
+    print_model_stats(
+        vit,
+        "ViT Teacher"
+    )
 
     vit=train_model(vit,train_loader,val_loader,class_weights)
 
@@ -612,6 +778,11 @@ def train_pipeline():
     print("\nTraining CNN")
 
     cnn=CNN()
+
+    print_model_stats(
+        cnn,
+        "CNN Student"
+    )
 
     cnn=train_model(cnn,train_loader,val_loader,class_weights)
 

@@ -32,6 +32,7 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
     accuracy_score,
+    cohen_kappa_score
 )
 
 import mne
@@ -39,6 +40,8 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from ssqueezepy import cwt as ssq_cwt
+from thop import profile
+from thop import clever_format
 # from train_models import (
 #     train_pipeline,
 # )
@@ -386,7 +389,6 @@ def evaluate(
     model.eval()
 
     preds = []
-
     trues = []
 
     with torch.no_grad():
@@ -403,36 +405,189 @@ def evaluate(
 
             trues.extend(y.numpy())
 
-    acc = accuracy_score(
+    classes = [
+        "Wake",
+        "N1",
+        "N2",
+        "N3",
+        "REM"
+    ]
+
+    # ==========================================
+    # CALCULATE METRICS
+    # ==========================================
+
+    accuracy = accuracy_score(
         trues,
-        preds,
+        preds
     )
 
-    f1 = f1_score(
+    macro_f1 = f1_score(
         trues,
         preds,
-        average="macro",
+        average="macro"
     )
 
-    print(f"\n{name}")
+    kappa = cohen_kappa_score(
+        trues,
+        preds
+    )
+
+    cm = confusion_matrix(
+        trues,
+        preds
+    )
+
+    report = classification_report(
+        trues,
+        preds,
+        target_names=classes,
+        output_dict=True,
+        zero_division=0
+    )
+
+    # ==========================================
+    # PRINT FINAL RESULTS
+    # ==========================================
+
+    print("\n" + "=" * 70)
+    print(f"{name} FINAL RESULTS")
+    print("=" * 70)
+
+    print(
+        f"Accuracy     : {accuracy:.4f}"
+    )
+
+    print(
+        f"Cohen Kappa  : {kappa:.4f}"
+    )
+
+    print(
+        f"Macro F1     : {macro_f1:.4f}"
+    )
+
+    # ==========================================
+    # STAGE-WISE METRICS
+    # ==========================================
+
+    print("\n" + "=" * 70)
+    print("STAGE-WISE METRICS")
+    print("=" * 70)
+
+    for cls in classes:
+
+        precision = report[
+            cls
+        ]["precision"]
+
+        recall = report[
+            cls
+        ]["recall"]
+
+        stage_f1 = report[
+            cls
+        ]["f1-score"]
+
+        print(
+            f"{cls:5} | "
+            f"Precision: {precision:.4f} | "
+            f"Recall: {recall:.4f} | "
+            f"F1 Score: {stage_f1:.4f}"
+        )
+
+    # ==========================================
+    # FULL CLASSIFICATION REPORT
+    # ==========================================
+
+    print("\n" + "=" * 70)
+    print("FULL CLASSIFICATION REPORT")
+    print("=" * 70)
 
     print(
         classification_report(
             trues,
             preds,
-            digits=3,
+            target_names=classes,
+            digits=4,
+            zero_division=0
         )
     )
 
-    print(
-        f"Accuracy: {acc:.4f}"
+    # ==========================================
+    # CONFUSION MATRIX TABLE
+    # ==========================================
+
+    cm_df = pd.DataFrame(
+        cm,
+        index=[
+            f"Actual_{c}"
+            for c in classes
+        ],
+        columns=[
+            f"Pred_{c}"
+            for c in classes
+        ]
     )
 
-    print(
-        f"Macro F1: {f1:.4f}"
+    print("\n" + "=" * 70)
+    print("CONFUSION MATRIX")
+    print("=" * 70)
+
+    print(cm_df)
+
+    # ==========================================
+    # VISUAL CONFUSION MATRIX
+    # ==========================================
+
+    plt.figure(figsize=(7, 6))
+
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=classes,
+        yticklabels=classes
     )
 
-    return acc, f1
+    plt.title(
+        f"{name} Confusion Matrix"
+    )
+
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
+
+    plt.show()
+
+    return (
+        accuracy,
+        macro_f1
+    )
+def print_model_stats(model, name):
+
+    model.eval()
+
+    dummy_input = torch.randn(
+        1, 3, 96, 96
+    ).to(DEVICE)
+
+    flops, params = profile(
+        model,
+        inputs=(dummy_input,),
+        verbose=False
+    )
+
+    flops, params = clever_format(
+        [flops, params],
+        "%.3f"
+    )
+
+    print("\n" + "=" * 50)
+    print(f"{name} Model Statistics")
+    print("=" * 50)
+    print(f"Parameters: {params}")
+    print(f"FLOPs: {flops}")
+    print("=" * 50)
 
 
 # =========================================================
@@ -501,10 +656,18 @@ def train_distillation(
 
     teacher = EnhancedViT().to(DEVICE)
 
+
+
     print("Loading teacher...")
     teacher.load_state_dict(
         torch.load(vit_pth_path, map_location=DEVICE)
     )
+
+    print_model_stats(
+        teacher,
+        "Teacher ViT"
+    )
+    
     print("Teacher loaded successfully")
     
 
@@ -514,6 +677,11 @@ def train_distillation(
         param.requires_grad = False
 
     student = CNN().to(DEVICE)
+
+    print_model_stats(
+        student,
+        "Student CNN"
+    )
 
     optimizer = optim.AdamW(
         student.parameters(),
@@ -601,11 +769,29 @@ def train_distillation(
             avg_ce = total_ce / total_samples
             avg_kd = total_kd / total_samples
 
-        acc, f1 = evaluate(
-            student,
-            test_loader,
-            f"Epoch {epoch+1}"
-        )
+        student.eval()
+
+        preds = []
+        trues = []
+
+        with torch.no_grad():
+
+            for x, y in test_loader:
+
+                x = x.to(DEVICE)
+
+                out = student(x)
+
+                p = out.argmax(1).cpu().numpy()
+
+                preds.extend(p)
+                trues.extend(y.numpy())
+
+        f1 = f1_score(
+            trues,
+            preds,
+            average="macro"
+)
 
 
         scheduler.step(f1)
