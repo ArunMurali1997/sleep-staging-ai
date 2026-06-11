@@ -42,6 +42,7 @@ import matplotlib.pyplot as plt
 from ssqueezepy import cwt as ssq_cwt
 from thop import profile
 from thop import clever_format
+import copy
 # from train_models import (
 #     train_pipeline,
 # )
@@ -563,16 +564,21 @@ def evaluate(
         accuracy,
         macro_f1
     )
+
 def print_model_stats(model, name):
 
-    model.eval()
+    temp_model = copy.deepcopy(
+        model
+    ).to(DEVICE)
+
+    temp_model.eval()
 
     dummy_input = torch.randn(
         1, 3, 96, 96
     ).to(DEVICE)
 
     flops, params = profile(
-        model,
+        temp_model,
         inputs=(dummy_input,),
         verbose=False
     )
