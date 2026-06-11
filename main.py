@@ -659,8 +659,18 @@ def train_distillation(
 
 
     print("Loading teacher...")
+    state_dict = torch.load(
+        vit_pth_path,
+        map_location=DEVICE
+    )
+    state_dict = {
+        k: v
+        for k, v in state_dict.items()
+        if "total_ops" not in k
+        and "total_params" not in k
+    }
     teacher.load_state_dict(
-        torch.load(vit_pth_path, map_location=DEVICE)
+        state_dict
     )
 
     print_model_stats(
