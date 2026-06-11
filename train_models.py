@@ -238,6 +238,7 @@ def preprocess():
 
 def print_model_stats(model, name):
 
+    model = model.to(DEVICE)   # FIX
     model.eval()
 
     dummy_input = torch.randn(
@@ -261,6 +262,7 @@ def print_model_stats(model, name):
     print(f"Parameters: {params}")
     print(f"FLOPs: {flops}")
     print("=" * 50)
+
 class SleepDataset(Dataset):
     def __init__(self, df, augment=False):
         self.df = df.reset_index(drop=True)
