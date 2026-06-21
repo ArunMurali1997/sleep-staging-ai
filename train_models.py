@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score
 from thop import profile
 from thop import clever_format
+import copy
 
 print(f"Torch Version: {torch.__version__}")
 print(f"CUDA Available: {torch.cuda.is_available()}")
@@ -417,10 +418,11 @@ def train_model(model, train_loader, val_loader, class_weights, epochs=EPOCHS, p
 
         scheduler.step()
 
-        if macro_f1>best_f1:
-
+        if macro_f1 > best_f1:
             best_f1 = macro_f1
-            best_state = model.state_dict()
+            best_state = copy.deepcopy(
+                model.state_dict()
+            )
 
             patience_counter = 0
 

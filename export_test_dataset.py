@@ -24,7 +24,7 @@ EXPORT_DIR.mkdir(
     exist_ok=True,
 )
 
-NUM_SUBJECTS_TO_EXPORT = 5
+# NUM_SUBJECTS_TO_EXPORT = 5
 
 
 # =========================================================
@@ -42,6 +42,7 @@ print(f"Subjects found: {len(subjects)}")
 random.seed(42)
 
 random.shuffle(subjects)
+NUM_SUBJECTS_TO_EXPORT = len(subjects)
 
 subjects = subjects[:NUM_SUBJECTS_TO_EXPORT]
 
