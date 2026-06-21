@@ -430,20 +430,7 @@ def train_model(model, train_loader, val_loader, class_weights, epochs=EPOCHS, p
             best_state = copy.deepcopy(
                 model.state_dict()
             )
-
-            patience_counter = 0
-
-        else:
-
-            patience_counter+=1
-
-        if patience_counter>=patience:
-
-            print("Early stopping triggered")
-            break
-
     model.load_state_dict(best_state)
-
     return model
 
 
