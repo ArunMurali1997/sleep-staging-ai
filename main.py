@@ -217,59 +217,39 @@ class SleepDataset(Dataset):
 # =========================================================
 
 class CNN(nn.Module):
-
     def __init__(self):
-
         super().__init__()
-
-        self.features = nn.Sequential(
-
-            nn.Conv2d(3, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.AdaptiveAvgPool2d((1,1))
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.AdaptiveAvgPool2d((1, 1))
         )
+        self.fc = nn.Linear(64,5)
 
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.3),
-            nn.Linear(128, NUM_CLASSES)
-        )
-
-    def forward(self,x):
-
-        x = self.features(x)
-
-        x = x.view(x.size(0),-1)
-
-        return self.classifier(x)
-
-# =========================================================
-# VIT
-# =========================================================
+    def forward(self, x):
+        x = self.net(x)
+        x = x.view(x.size(0), -1)
+        return self.fc(x)
 
 class EnhancedViT(nn.Module):
-    def __init__(self, img_size=96, patch=8, dim=256, depth=8, heads=8):
+    def __init__(self, img_size=96, patch=8, dim=384, depth=10, heads=8):
         super().__init__()
         num_patches = (img_size // patch) ** 2
         self.patch_embed = nn.Conv2d(3, dim, patch, patch)
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
         self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, dim) * 0.02)
 
+        # FIX: norm_first=True switches this to a Pre-LN transformer.
+        # Pre-LN keeps gradients well-scaled from the very first step, which
+        # is what makes a deep (8-layer) transformer trainable from scratch
+        # on a small dataset without LR warmup collapsing it onto the
+        # majority class. Post-LN (the previous default) is known to need
+        # warmup to avoid exactly that failure mode.
         encoder_layer = nn.TransformerEncoderLayer(
-            dim, heads, dim_feedforward=512, dropout=0.1,
-            activation="gelu", batch_first=True
+            dim, heads, dim_feedforward=1024, dropout=0.1,
+            activation="gelu", batch_first=True,
+            norm_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, depth)
         self.norm = nn.LayerNorm(dim)
