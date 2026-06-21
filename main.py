@@ -319,7 +319,7 @@ def train_model(
 
         model.train()
 
-        for x, y in train_loader:
+        for batch_idx, (x, y) in enumerate(train_loader):
 
             x = x.to(DEVICE)
 
@@ -625,10 +625,22 @@ def get_data_loaders():
         test_files
     )
 
-    class_weights = torch.ones(
-        NUM_CLASSES,
+    all_labels = []
+
+    for file_path in train_files:
+        data = torch.load(file_path, map_location="cpu")
+        all_labels.extend(data["labels"])
+
+    label_counts = np.bincount(all_labels, minlength=NUM_CLASSES)
+    weights = len(all_labels) / (NUM_CLASSES * label_counts)
+
+    class_weights = torch.tensor(
+        weights,
         dtype=torch.float32
     )
+
+    print("\nClass Weights:")
+    print(class_weights)
 
     train_loader = DataLoader(
         train_dataset,
@@ -730,7 +742,7 @@ def train_distillation(
         total_kd = 0
         total_samples = 0
 
-        for x, y in train_loader:
+        for batch_idx, (x, y) in enumerate(train_loader):
 
             x = x.to(DEVICE)
 
@@ -743,6 +755,37 @@ def train_distillation(
                 teacher_logits = teacher(x)
 
             student_logits = student(x)
+
+            if epoch == 0 and batch_idx == 0:
+
+                print("\n===== DISTILLATION SAMPLE =====")
+
+                print("Ground Truth:")
+                print(y[:5].cpu().numpy())
+
+                print("\nTeacher Logits:")
+                print(teacher_logits[:2].detach().cpu())
+
+                print("\nTeacher Soft Targets:")
+                print(
+                    F.softmax(
+                        teacher_logits[:2] / T,
+                        dim=1
+                    ).cpu()
+                )
+
+                print("\nStudent Logits:")
+                print(student_logits[:2].detach().cpu())
+
+                print("\nStudent Soft Targets:")
+                print(
+                    F.softmax(
+                        student_logits[:2] / T,
+                        dim=1
+                    ).cpu()
+                )
+
+                print("===============================\n")
 
             loss_ce = ce_loss(
                 student_logits,
@@ -781,6 +824,12 @@ def train_distillation(
 
             optimizer.step()
 
+            if batch_idx % 20 == 0:
+                print(
+                    f"Epoch {epoch+1} Batch {batch_idx}/{len(train_loader)} "
+                    f"Loss {loss.item():.4f} CE {loss_ce.item():.4f} KD {loss_kd.item():.4f}"
+                )
+
             avg_loss = total_loss / total_samples
             avg_ce = total_ce / total_samples
             avg_kd = total_kd / total_samples
@@ -803,6 +852,10 @@ def train_distillation(
                 preds.extend(p)
                 trues.extend(y.numpy())
 
+        acc = accuracy_score(trues, preds)
+
+        kappa = cohen_kappa_score(trues, preds)
+
         f1 = f1_score(
             trues,
             preds,
@@ -811,12 +864,17 @@ def train_distillation(
 
 
         scheduler.step(f1)
+        current_lr = optimizer.param_groups[0]["lr"]
+
         print(
-            f"Epoch {epoch+1} "
-            f"| Loss {avg_loss:.4f} "
-            f"| CE {avg_ce:.4f} "
-            f"| KD {avg_kd:.4f} "
-            f"| F1 {f1:.4f}"
+            f"Epoch {epoch+1:02d}"
+            f" | LR {current_lr:.6f}"
+            f" | Loss {avg_loss:.4f}"
+            f" | CE {avg_ce:.4f}"
+            f" | KD {avg_kd:.4f}"
+            f" | Acc {acc:.4f}"
+            f" | Kappa {kappa:.4f}"
+            f" | F1 {f1:.4f}"
         )
 
         if f1 > best_f1:
@@ -827,9 +885,13 @@ def train_distillation(
                 k: v.cpu().clone()
                 for k, v in student.state_dict().items()
             }
-            print(
-                f"New Best F1: {best_f1:.4f}"
-            )
+            print("\n" + "="*60)
+            print("NEW BEST MODEL")
+            print("="*60)
+            print(f"Accuracy : {acc:.4f}")
+            print(f"Kappa    : {kappa:.4f}")
+            print(f"Macro F1 : {best_f1:.4f}")
+            print("="*60)
 
 
 
